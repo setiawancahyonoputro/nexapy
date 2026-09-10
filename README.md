@@ -171,9 +171,9 @@ print(response.raw)      # {"choices": [...], "usage": {...}}
 
 ---
 
-## JavaScript / TypeScript Client SDK Generator (v0.2)
+## JavaScript / TypeScript / React Client SDK Generator (v0.2)
 
-NexaPy includes a built-in SDK generator CLI tool to auto-generate production-ready JavaScript and TypeScript client libraries for frontend integration.
+NexaPy includes a built-in SDK generator CLI tool to auto-generate production-ready JavaScript, TypeScript, and React client libraries for frontend integration.
 
 ### Generate JavaScript SDK
 ```bash
@@ -203,6 +203,29 @@ const result: AIResponse = await client.chat("Jelaskan machine learning", { reas
 console.log(result.text, result.provider);
 ```
 
+### Generate React SDK
+```bash
+nexapy sdk generate --lang react --output src/nexapy_sdk
+```
+
+Usage in React:
+```tsx
+import { useNexaPy } from "./nexapy_sdk/react";
+
+function Chat() {
+  const { send, data, loading, error } = useNexaPy();
+
+  return (
+    <button
+      disabled={loading}
+      onClick={() => send("Hello NexaPy")}
+    >
+      {loading ? "Thinking..." : "Ask AI"}
+    </button>
+  );
+}
+```
+
 ---
 
 ## CLI Reference
@@ -211,15 +234,15 @@ console.log(result.text, result.provider);
 - `nexapy init <name>`: Create project directory with starter code and configuration.
 - `nexapy dev`: Launch live-reloading uvicorn development server.
 - `nexapy doctor`: Diagnostic tool checking Python, dependencies, `.env`, and AI provider readiness.
-- `nexapy sdk generate`: Auto-generate JavaScript/TypeScript client SDK (`--lang`, `--output`, `--base-url`, `--ai-path`).
+- `nexapy sdk generate`: Auto-generate JavaScript/TypeScript/React client SDK (`--lang`, `--output`, `--base-url`, `--ai-path`).
 
 ---
 
 ## Project Roadmap
 
-- [x] **v0.1 MVP**: CLI, FastAPI Core, Config YAML/.env, Priority AI Router (FreeModel + Gemini), Normalized AIResponse, CORS, `@app.ai()`, `nexapy doctor`.
-- [ ] **v0.2**: React & JavaScript/TypeScript SDKs.
-- [ ] **v0.3**: Workflow Engine & n8n Integration.
+- [x] **v0.1 Core**: CLI, FastAPI Core, Config YAML/.env, Priority AI Router (FreeModel + Gemini), Normalized AIResponse, CORS, `@app.ai()`, `nexapy doctor`.
+- [x] **v0.2 JavaScript, TypeScript & React SDK**: Client SDK generators, React `useNexaPy` hook, string escaping, configurable timeout/paths, and full CI validation.
+- [ ] **v0.3 Workflow Engine & n8n**: Automation core (`workflow`, `trigger`, `actions`, `runner`) and n8n export layer.
 
 ---
 

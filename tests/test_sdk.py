@@ -78,11 +78,35 @@ def test_generate_react_sdk():
         assert f"v{__version__}" in hook_content
         assert "export function useNexaPy" in hook_content
         assert "export interface UseNexaPyReturn" in hook_content
+        assert "useMemo" in hook_content
+        assert "useCallback" in hook_content
+        assert "useState" in hook_content
         assert "send: (prompt: string" in hook_content
         assert "data: AIResponse | null" in hook_content
         assert "loading: boolean" in hook_content
         assert "error: string | null" in hook_content
         assert "reset: () => void" in hook_content
+
+
+def test_react_sdk_usememo_reactivity():
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        out_path = Path(tmp_dir) / "react_sdk"
+        generate_react_sdk(out_path, base_url="http://api.example.com", ai_path="/ai/chat")
+
+        hook_content = (out_path / "react" / "useNexaPy.ts").read_text(encoding="utf-8")
+        assert "import { useState, useCallback, useMemo } from \"react\";" in hook_content
+        assert "const client = useMemo(" in hook_content
+        assert "[options.client, options.baseURL, options.timeout, options.aiPath]" in hook_content
+
+
+def test_sdk_json_escaped_strings():
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        out_path = Path(tmp_dir) / "escaped_sdk"
+        generate_javascript_sdk(out_path, base_url='http://api.example.com/"quote"', ai_path='/ai/"chat"')
+
+        js_content = (out_path / "client.js").read_text(encoding="utf-8")
+        assert 'http://api.example.com/\\"quote\\"' in js_content or 'http://api.example.com/"quote"' in js_content
+
 
 
 def test_sdk_custom_ai_path_option():

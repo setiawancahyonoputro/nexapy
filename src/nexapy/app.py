@@ -1,6 +1,6 @@
 import inspect
 from typing import Any, Callable, Dict, List, Literal, Optional
-from fastapi import FastAPI, Request
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
@@ -90,7 +90,7 @@ class NexaPy:
 
         def decorator(func: Callable) -> Callable:
             @self.fastapi.api_route(path, methods=route_methods, **route_kwargs)
-            async def ai_endpoint(body: AIChatRequest, request: Request):
+            async def ai_endpoint(body: AIChatRequest):
                 query_prompt = body.prompt
                 req_provider = body.provider or provider
                 req_reasoning = body.reasoning

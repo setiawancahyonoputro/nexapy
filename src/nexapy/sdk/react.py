@@ -18,7 +18,7 @@ def generate_react_sdk(
     react_dir = output_dir / "react"
     react_dir.mkdir(parents=True, exist_ok=True)
 
-    use_nexapy_ts = f'''import {{ useState, useCallback }} from "react";
+    use_nexapy_ts = f'''import {{ useState, useCallback, useMemo }} from "react";
 import {{ NexaPyClient }} from "../client";
 import {{ AIResponse, AIChatOptions, NexaPyClientOptions }} from "../types";
 
@@ -49,7 +49,16 @@ export interface UseNexaPyReturn {{
  *   await send("Hello NexaPy!");
  */
 export function useNexaPy(options: UseNexaPyOptions = {{}}): UseNexaPyReturn {{
-  const [client] = useState(() => options.client || new NexaPyClient(options));
+  const client = useMemo(
+    () =>
+      options.client ||
+      new NexaPyClient({{
+        baseURL: options.baseURL,
+        timeout: options.timeout,
+        aiPath: options.aiPath,
+      }}),
+    [options.client, options.baseURL, options.timeout, options.aiPath]
+  );
   const [data, setData] = useState<AIResponse | null>(null);
   const [loading, setLoading] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
