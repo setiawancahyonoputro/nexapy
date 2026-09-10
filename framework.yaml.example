@@ -1,0 +1,21 @@
+# NexaPy Framework Configuration Example
+# Rename this file to framework.yaml to configure your application
+
+app:
+  name: NexaPy Starter Application
+
+cors:
+  enabled: true
+  origins:
+    - http://localhost:3000
+    - http://localhost:5173
+
+ai:
+  provider: auto      # Options: auto, freemodel, gemini
+  priority:
+    - freemodel
+    - gemini
+  freemodel:
+    model: auto
+  gemini:
+    model: gemini-3.8-flash
