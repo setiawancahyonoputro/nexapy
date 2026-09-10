@@ -60,7 +60,7 @@ def read_root():
     return {"message": "Hello from NexaPy!"}
 
 
-@app.ai("/chat")
+@app.ai("/ai/chat")
 async def chat(prompt: str):
     # Automatically routes prompt to FreeModel or Gemini cloud
     pass
@@ -221,13 +221,14 @@ def sdk_generate(
     lang: str = typer.Option("javascript", "--lang", "-l", help="SDK Language ('javascript'/'js', 'typescript'/'ts')"),
     output: str = typer.Option("nexapy_sdk", "--output", "-o", help="Output directory path"),
     base_url: str = typer.Option("http://localhost:8000", "--base-url", "-b", help="Default API base URL"),
+    ai_path: str = typer.Option("/ai/chat", "--ai-path", "-p", help="Target AI route path (default: '/ai/chat')"),
 ):
     """Generate JavaScript or TypeScript client SDK for NexaPy backend."""
     from nexapy.sdk import generate_sdk
 
     out_path = Path(output)
     try:
-        generate_sdk(lang=lang, output_dir=out_path, base_url=base_url)
+        generate_sdk(lang=lang, output_dir=out_path, base_url=base_url, ai_path=ai_path)
         console.print(f"\n[bold green]Successfully generated {lang} SDK in '{output}/'[/bold green]\n")
         if lang.lower() in ("javascript", "js"):
             console.print(f"Created file: [cyan]{output}/client.js[/cyan]")

@@ -70,7 +70,7 @@ def home():
     return {"message": "Welcome to NexaPy!"}
 
 # 2. NexaPy AI Route Decorator
-@app.ai("/chat")
+@app.ai("/ai/chat")
 async def chat(prompt: str):
     # Automatically routes prompt to FreeModel or Gemini
     pass
@@ -171,12 +171,47 @@ print(response.raw)      # {"choices": [...], "usage": {...}}
 
 ---
 
+## JavaScript / TypeScript Client SDK Generator (v0.2)
+
+NexaPy includes a built-in SDK generator CLI tool to auto-generate production-ready JavaScript and TypeScript client libraries for frontend integration.
+
+### Generate JavaScript SDK
+```bash
+nexapy sdk generate --lang javascript --output nexapy_sdk
+```
+
+Usage in JavaScript:
+```javascript
+import { NexaPyClient } from "./nexapy_sdk/client.js";
+
+const client = new NexaPyClient({ baseURL: "http://localhost:8000" });
+const result = await client.chat("Jelaskan machine learning");
+console.log(result.text, result.provider);
+```
+
+### Generate TypeScript SDK
+```bash
+nexapy sdk generate --lang typescript --output nexapy_sdk
+```
+
+Usage in TypeScript:
+```typescript
+import { NexaPyClient, AIResponse } from "./nexapy_sdk";
+
+const client = new NexaPyClient({ baseURL: "http://localhost:8000" });
+const result: AIResponse = await client.chat("Jelaskan machine learning", { reasoning: "high" });
+console.log(result.text, result.provider);
+```
+
+---
+
 ## CLI Reference
 
-- `nexapy --version`: Display current version.
+- `nexapy --version`: Display current framework version.
 - `nexapy init <name>`: Create project directory with starter code and configuration.
 - `nexapy dev`: Launch live-reloading uvicorn development server.
 - `nexapy doctor`: Diagnostic tool checking Python, dependencies, `.env`, and AI provider readiness.
+- `nexapy sdk generate`: Auto-generate JavaScript/TypeScript client SDK (`--lang`, `--output`, `--base-url`, `--ai-path`).
 
 ---
 

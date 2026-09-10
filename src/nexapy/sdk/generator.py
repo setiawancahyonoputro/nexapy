@@ -10,6 +10,7 @@ def generate_sdk(
     lang: str,
     output_dir: Union[str, Path] = "nexapy_sdk",
     base_url: str = "http://localhost:8000",
+    ai_path: str = "/ai/chat",
 ) -> Path:
     """
     Generate client SDK code for the specified language.
@@ -21,9 +22,9 @@ def generate_sdk(
     path = Path(output_dir)
 
     if target_lang in ("javascript", "js"):
-        generate_javascript_sdk(path, base_url=base_url)
+        generate_javascript_sdk(path, base_url=base_url, ai_path=ai_path)
     elif target_lang in ("typescript", "ts"):
-        generate_typescript_sdk(path, base_url=base_url)
+        generate_typescript_sdk(path, base_url=base_url, ai_path=ai_path)
     else:
         raise ValueError(
             f"Unsupported language '{lang}'. Supported values are 'javascript' ('js') and 'typescript' ('ts')."

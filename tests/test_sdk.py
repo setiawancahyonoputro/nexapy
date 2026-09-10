@@ -1,7 +1,9 @@
 import tempfile
 from pathlib import Path
 import pytest
+from fastapi.testclient import TestClient
 from typer.testing import CliRunner
+from nexapy import NexaPy, __version__
 from nexapy.cli import app
 from nexapy.sdk import generate_sdk, generate_javascript_sdk, generate_typescript_sdk
 
@@ -11,22 +13,25 @@ runner = CliRunner()
 def test_generate_javascript_sdk():
     with tempfile.TemporaryDirectory() as tmp_dir:
         out_path = Path(tmp_dir) / "js_sdk"
-        generate_javascript_sdk(out_path, base_url="http://api.example.com")
+        generate_javascript_sdk(out_path, base_url="http://api.example.com", ai_path="/ai/chat")
 
         client_file = out_path / "client.js"
         assert client_file.exists()
         content = client_file.read_text(encoding="utf-8")
 
+        assert f"v{__version__}" in content
         assert "export class NexaPyClient" in content
         assert "http://api.example.com" in content
-        assert "async chat(prompt" in content
-        assert "async generate(prompt" in content
+        assert "/ai/chat" in content
+        assert "AbortController" in content
+        assert "try {" in content
+        assert "catch (err)" in content
 
 
 def test_generate_typescript_sdk():
     with tempfile.TemporaryDirectory() as tmp_dir:
         out_path = Path(tmp_dir) / "ts_sdk"
-        generate_typescript_sdk(out_path, base_url="http://api.example.com")
+        generate_typescript_sdk(out_path, base_url="http://api.example.com", ai_path="/ai/chat")
 
         client_file = out_path / "client.ts"
         types_file = out_path / "types.ts"
@@ -38,13 +43,25 @@ def test_generate_typescript_sdk():
 
         types_content = types_file.read_text(encoding="utf-8")
         assert "export interface AIResponse" in types_content
-        assert 'provider: "freemodel" | "gemini" | string;' in types_content
+        assert 'export type AIProvider = "freemodel" | "gemini" | "unknown"' in types_content
         assert "export interface AIChatOptions" in types_content
 
         client_content = client_file.read_text(encoding="utf-8")
+        assert f"v{__version__}" in client_content
         assert "export class NexaPyClient" in client_content
         assert "Promise<AIResponse>" in client_content
         assert "http://api.example.com" in client_content
+        assert "/ai/chat" in client_content
+        assert "AbortController" in client_content
+
+
+def test_sdk_custom_ai_path_option():
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        out_path = Path(tmp_dir) / "custom_sdk"
+        generate_sdk("ts", out_path, base_url="http://localhost:8000", ai_path="/custom-ai-route")
+
+        client_content = (out_path / "client.ts").read_text(encoding="utf-8")
+        assert "/custom-ai-route" in client_content
 
 
 def test_generate_sdk_orchestrator_aliases_and_validation():
@@ -76,18 +93,34 @@ def test_cli_sdk_generate_javascript():
         assert (out_dir / "client.js").exists()
 
 
-def test_cli_sdk_generate_typescript():
+def test_cli_sdk_generate_typescript_custom_path():
     with tempfile.TemporaryDirectory() as tmp_dir:
         out_dir = Path(tmp_dir) / "my_ts_sdk"
-        result = runner.invoke(app, ["sdk", "generate", "-l", "typescript", "-o", str(out_dir)])
+        result = runner.invoke(
+            app, ["sdk", "generate", "-l", "typescript", "-o", str(out_dir), "-p", "/my-custom-path"]
+        )
         assert result.exit_code == 0
         assert "Successfully generated typescript SDK" in result.output
-        assert (out_dir / "client.ts").exists()
-        assert (out_dir / "types.ts").exists()
-        assert (out_dir / "index.ts").exists()
+        client_content = (out_dir / "client.ts").read_text(encoding="utf-8")
+        assert "/my-custom-path" in client_content
 
 
 def test_cli_sdk_generate_invalid_language():
     result = runner.invoke(app, ["sdk", "generate", "--lang", "invalid_lang"])
     assert result.exit_code == 1
     assert "Unsupported language 'invalid_lang'" in result.output
+
+
+def test_sdk_fastapi_default_route_alignment():
+    """Verify default route registered by NexaPy app matches default route used by generated SDK."""
+    nexa = NexaPy()
+
+    @nexa.ai()  # Defaults to /ai/chat
+    async def chat(prompt: str):
+        from nexapy.ai.base import AIResponse
+        return AIResponse(text="Aligned route output", provider="freemodel", model="auto", success=True)
+
+    client = TestClient(nexa.fastapi)
+    res = client.post("/ai/chat", json={"prompt": "Test alignment"})
+    assert res.status_code == 200
+    assert res.json()["text"] == "Aligned route output"
