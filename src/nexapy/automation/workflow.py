@@ -5,11 +5,11 @@ from .registry import Workflow, workflow_registry
 
 
 @overload
-def workflow(name: str) -> Callable[[Callable[..., Any]], Workflow]:
+def workflow(name: str) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
     ...
 
 @overload
-def workflow(func: Callable[..., Any]) -> Workflow:
+def workflow(func: Callable[..., Any]) -> Callable[..., Any]:
     ...
 
 def workflow(
@@ -18,6 +18,7 @@ def workflow(
 ) -> Any:
     """
     Decorator to register a function as a NexaPy workflow.
+    Returns the original decorated function so it remains directly callable.
 
     Usage:
         @workflow("hello")
@@ -31,10 +32,12 @@ def workflow(
     if callable(name_or_func):
         func = name_or_func
         wf_name = func.__name__
-        return workflow_registry.register(name=wf_name, func=func, description=description)
+        workflow_registry.register(name=wf_name, func=func, description=description)
+        return func
 
-    def decorator(func: Callable[..., Any]) -> Workflow:
+    def decorator(func: Callable[..., Any]) -> Callable[..., Any]:
         wf_name = name_or_func if isinstance(name_or_func, str) and name_or_func.strip() else func.__name__
-        return workflow_registry.register(name=wf_name, func=func, description=description)
+        workflow_registry.register(name=wf_name, func=func, description=description)
+        return func
 
     return decorator

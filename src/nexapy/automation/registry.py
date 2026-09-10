@@ -21,8 +21,16 @@ class WorkflowRegistry:
     def __init__(self):
         self._workflows: Dict[str, Workflow] = {}
 
-    def register(self, name: str, func: Callable[..., Any], description: Optional[str] = None) -> Workflow:
+    def register(
+        self,
+        name: str,
+        func: Callable[..., Any],
+        description: Optional[str] = None,
+        override: bool = False,
+    ) -> Workflow:
         """Register a workflow function under a unique name."""
+        if name in self._workflows and not override:
+            raise ValueError(f"Workflow '{name}' is already registered.")
         wf = Workflow(name=name, func=func, description=description)
         self._workflows[name] = wf
         return wf

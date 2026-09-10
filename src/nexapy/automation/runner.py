@@ -51,16 +51,19 @@ class WorkflowRunner:
         workflow_or_name: Union[str, Workflow, Any],
         input_data: Optional[Dict[str, Any]] = None,
     ) -> Any:
-        """Synchronous wrapper to run a workflow."""
+        """Synchronous entry point to run a workflow."""
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
             loop = None
 
         if loop and loop.is_running():
-            return loop.create_task(self.run_async(workflow_or_name, input_data))
-        else:
-            return asyncio.run(self.run_async(workflow_or_name, input_data))
+            raise RuntimeError(
+                "runner.run() cannot be used inside an active event loop. "
+                "Use await runner.run_async(...) instead."
+            )
+
+        return asyncio.run(self.run_async(workflow_or_name, input_data))
 
 
 # Singleton runner instance

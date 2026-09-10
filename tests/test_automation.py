@@ -1,4 +1,6 @@
+import asyncio
 import json
+import os
 import tempfile
 from pathlib import Path
 import pytest
@@ -62,6 +64,36 @@ def test_workflow_decorator_and_registry():
     assert [w.name for w in all_workflows] == ["hello", "simple_sync"]
 
 
+def test_decorated_workflow_remains_callable():
+    """Verify @workflow returns the original function so it remains directly callable."""
+    @workflow("direct_call")
+    def direct_call(ctx):
+        return f"Hello {ctx.get('name')}"
+
+    assert callable(direct_call)
+    ctx = WorkflowContext(input_data={"name": "Direct"}, workflow_name="direct_call")
+    result = direct_call(ctx)
+    assert result == "Hello Direct"
+
+
+def test_duplicate_workflow_registration_raises_value_error():
+    """Verify registering a duplicate workflow name raises ValueError unless override=True."""
+    @workflow("duplicate_test")
+    def first_flow(ctx):
+        return "first"
+
+    with pytest.raises(ValueError) as exc_info:
+        @workflow("duplicate_test")
+        def second_flow(ctx):
+            return "second"
+
+    assert "Workflow 'duplicate_test' is already registered" in str(exc_info.value)
+
+    # Allowed with explicit override
+    workflow_registry.register("duplicate_test", func=lambda ctx: "overridden", override=True)
+    assert workflow_registry.get("duplicate_test").func(None) == "overridden"
+
+
 def test_workflow_runner_async_and_sync():
     @workflow("async_flow")
     async def async_flow(ctx):
@@ -88,6 +120,24 @@ def test_workflow_runner_unregistered():
     assert "Workflow 'non_existent_flow' is not registered" in str(exc_info.value)
 
 
+@pytest.mark.asyncio
+async def test_runner_run_inside_active_event_loop_raises_runtime_error():
+    """Verify runner.run raises RuntimeError when invoked inside an active event loop."""
+    @workflow("loop_test")
+    def flow():
+        return "ok"
+
+    w_runner = WorkflowRunner()
+    with pytest.raises(RuntimeError) as exc_info:
+        w_runner.run("loop_test")
+
+    assert "runner.run() cannot be used inside an active event loop" in str(exc_info.value)
+
+    # run_async must work inside active event loop
+    res = await w_runner.run_async("loop_test")
+    assert res == "ok"
+
+
 def test_cli_workflow_list_empty():
     result = cli_runner.invoke(app, ["workflow", "list"])
     assert result.exit_code == 0
@@ -112,6 +162,24 @@ def test_cli_workflow_list_with_items():
     assert "Available Workflows" in output
     assert "customer-support" in output
     assert "daily-report" in output
+
+
+def test_cli_workflow_import_error_propagation():
+    """Verify CLI reports import errors cleanly and exits with code 1."""
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        broken_app = Path(tmp_dir) / "app.py"
+        broken_app.write_text("raise RuntimeError('boom during import')", encoding="utf-8")
+
+        cwd = os.getcwd()
+        try:
+            os.chdir(tmp_dir)
+            result = cli_runner.invoke(app, ["workflow", "list"])
+            assert result.exit_code == 1
+            output = strip_ansi(result.output)
+            assert "Failed to load workflows from 'app.py'" in output
+            assert "RuntimeError: boom during import" in output
+        finally:
+            os.chdir(cwd)
 
 
 def test_cli_workflow_run_success():
@@ -165,3 +233,26 @@ def test_cli_workflow_run_invalid_cases():
     res2 = cli_runner.invoke(app, ["workflow", "run", "dummy", "-i", "invalid-json"])
     assert res2.exit_code == 1
     assert "Invalid JSON string" in strip_ansi(res2.output)
+
+
+@pytest.mark.asyncio
+async def test_workflow_ctx_ai_action():
+    """Verify ctx.ai(...) action completes prompt via AI router within workflow context."""
+    from unittest.mock import AsyncMock, patch
+    from nexapy.ai.base import AIResponse
+
+    mock_res = AIResponse(text="Summarized output", provider="freemodel", model="auto", success=True)
+
+    @workflow("ai_summary")
+    async def ai_summary(ctx):
+        res = await ctx.ai("Summarize text: " + ctx.input["text"])
+        return {"summary": res.text, "provider": res.provider}
+
+    with patch("nexapy.ai.router.AI.chat", new_callable=AsyncMock) as mock_chat:
+        mock_chat.return_value = mock_res
+        w_runner = WorkflowRunner()
+        res = await w_runner.run_async("ai_summary", input_data={"text": "Long article text"})
+        assert res["summary"] == "Summarized output"
+        assert res["provider"] == "freemodel"
+        mock_chat.assert_called_once()
+

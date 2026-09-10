@@ -266,8 +266,9 @@ def _import_local_workflows():
             mod_name = p.stem
             try:
                 __import__(mod_name)
-            except Exception:
-                pass
+            except Exception as err:
+                console.print(f"\n[bold red]Failed to load workflows from '{target}':[/bold red]\n{type(err).__name__}: {err}\n")
+                raise typer.Exit(code=1)
 
 
 @workflow_app.command("list")
