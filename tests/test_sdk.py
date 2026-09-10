@@ -174,9 +174,12 @@ def test_cli_sdk_generate_react():
 
 
 def test_cli_sdk_generate_invalid_language():
+    from click.utils import strip_ansi
+
     result = runner.invoke(app, ["sdk", "generate", "--lang", "invalid_lang"])
+    output = strip_ansi(result.output)
     assert result.exit_code == 1
-    assert "Unsupported language 'invalid_lang'" in result.output
+    assert "Unsupported language 'invalid_lang'" in output
 
 
 def test_sdk_fastapi_default_route_alignment():

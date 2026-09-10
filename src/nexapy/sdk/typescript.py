@@ -45,6 +45,7 @@ export interface AIChatOptions {{
 export interface NexaPyClientOptions {{
   baseURL?: string;
   timeout?: number;
+  aiPath?: string;
 }}
 '''
     (output_dir / "types.ts").write_text(types_ts, encoding="utf-8")
@@ -64,7 +65,7 @@ export class NexaPyClient {{
   constructor(options: NexaPyClientOptions = {{}}) {{
     this.baseURL = (options.baseURL || {clean_base_url_json}).replace(/\\/+$/, "");
     this.timeout = options.timeout !== undefined ? options.timeout : 30000;
-    this.aiPath = {clean_ai_path_json};
+    this.aiPath = options.aiPath || {clean_ai_path_json};
   }}
 
   async chat(prompt: string, options: AIChatOptions = {{}}): Promise<AIResponse> {{
