@@ -12,7 +12,7 @@
 - ⚡ **FastAPI Core**: ASGI-native speed, automatic Swagger OpenAPI docs (`/docs`), and clean routing.
 - 🤖 **Smart Priority AI Router**: Auto-routes completion prompts with fallback chain (e.g., **FreeModel** $\rightarrow$ **Gemini**).
 - 📦 **Normalized `AIResponse`**: Unified response schema across all AI providers.
-- 🎯 **Simple AI API**: Use high-level `AI()` client or `@app.ai("/chat")` decorator.
+- 🎯 **Simple AI API**: Use high-level `AI()` client or `@app.ai("/ai/chat")` decorator.
 - 🌐 **Automatic CORS**: Built-in `CORSMiddleware` configured via `framework.yaml` or `.env`.
 - 🩺 **CLI Health Doctor**: Run `nexapy doctor` to diagnose environment and AI provider configuration status.
 

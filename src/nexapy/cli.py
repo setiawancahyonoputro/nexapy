@@ -249,5 +249,106 @@ def sdk_generate(
         raise typer.Exit(code=1)
 
 
+# ---------------------------------------------------------------------------
+# Workflow Commands (v0.3 Automation Core)
+# ---------------------------------------------------------------------------
+
+workflow_app = typer.Typer(name="workflow", help="Manage and execute NexaPy automation workflows.")
+app.add_typer(workflow_app, name="workflow")
+
+
+def _import_local_workflows():
+    """Helper to auto-import app.py or local workflow files if present."""
+    sys.path.insert(0, str(Path.cwd()))
+    for target in ["app.py", "workflow.py", "workflows.py", "main.py"]:
+        p = Path.cwd() / target
+        if p.exists():
+            mod_name = p.stem
+            try:
+                __import__(mod_name)
+            except Exception:
+                pass
+
+
+@workflow_app.command("list")
+def workflow_list():
+    """List all registered automation workflows."""
+    from nexapy.automation import workflow_registry
+
+    _import_local_workflows()
+
+    workflows = workflow_registry.list_all()
+
+    if not workflows:
+        console.print("\n[yellow]No workflows registered.[/yellow]\n")
+        console.print("[dim]Register a workflow using @workflow('name') in your python application.[/dim]\n")
+        return
+
+    console.print("\n[bold cyan]Available Workflows[/bold cyan]\n")
+    table = Table(show_header=True, header_style="bold magenta")
+    table.add_column("Workflow Name", style="cyan")
+    table.add_column("Description", style="dim")
+
+    for wf in workflows:
+        table.add_row(wf.name, wf.description or "")
+
+    console.print(table)
+    console.print("")
+
+
+@workflow_app.command("run")
+def workflow_run(
+    name: str = typer.Argument(..., help="Name of the workflow to run"),
+    input_str: Optional[str] = typer.Option(None, "--input", "-i", help="Input data as JSON string or file path (e.g. '{\"key\":\"val\"}' or @data.json)"),
+):
+    """Execute a registered automation workflow by name."""
+    import json
+    from nexapy.automation import workflow_registry, runner
+
+    _import_local_workflows()
+
+    wf = workflow_registry.get(name)
+    if not wf:
+        console.print(f"\n[bold red]Error:[/bold red] Workflow '{name}' is not registered.\n")
+        workflows = workflow_registry.list_all()
+        if workflows:
+            names = ", ".join([f"'{w.name}'" for w in workflows])
+            console.print(f"Available workflows: {names}\n")
+        raise typer.Exit(code=1)
+
+    input_data = {}
+    if input_str:
+        s = input_str.strip()
+        if s.startswith("@") or s.endswith(".json"):
+            file_path = Path(s.lstrip("@"))
+            if not file_path.exists():
+                console.print(f"\n[bold red]Error:[/bold red] Input file '{file_path}' not found.\n")
+                raise typer.Exit(code=1)
+            try:
+                input_data = json.loads(file_path.read_text(encoding="utf-8"))
+            except Exception as err:
+                console.print(f"\n[bold red]Error:[/bold red] Failed to parse JSON from file '{file_path}': {err}\n")
+                raise typer.Exit(code=1)
+        else:
+            try:
+                input_data = json.loads(s)
+            except Exception as err:
+                console.print(f"\n[bold red]Error:[/bold red] Invalid JSON string provided for --input: {err}\n")
+                raise typer.Exit(code=1)
+
+    try:
+        result = runner.run(wf, input_data=input_data)
+        console.print(f"\n[bold green]Workflow '{name}' executed successfully:[/bold green]\n")
+        if isinstance(result, (dict, list)):
+            console.print_json(json.dumps(result))
+        else:
+            console.print(result)
+        console.print("")
+    except Exception as err:
+        console.print(f"\n[bold red]Workflow Execution Error:[/bold red] {err}\n")
+        raise typer.Exit(code=1)
+
+
 if __name__ == "__main__":
     app()
+
