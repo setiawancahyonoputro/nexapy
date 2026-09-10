@@ -5,7 +5,12 @@ from fastapi.testclient import TestClient
 from typer.testing import CliRunner
 from nexapy import NexaPy, __version__
 from nexapy.cli import app
-from nexapy.sdk import generate_sdk, generate_javascript_sdk, generate_typescript_sdk
+from nexapy.sdk import (
+    generate_sdk,
+    generate_javascript_sdk,
+    generate_typescript_sdk,
+    generate_react_sdk,
+)
 
 runner = CliRunner()
 
@@ -55,6 +60,31 @@ def test_generate_typescript_sdk():
         assert "AbortController" in client_content
 
 
+def test_generate_react_sdk():
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        out_path = Path(tmp_dir) / "react_sdk"
+        generate_react_sdk(out_path, base_url="http://api.example.com", ai_path="/ai/chat")
+
+        assert (out_path / "client.ts").exists()
+        assert (out_path / "types.ts").exists()
+        assert (out_path / "index.ts").exists()
+
+        react_dir = out_path / "react"
+        assert react_dir.exists()
+        assert (react_dir / "useNexaPy.ts").exists()
+        assert (react_dir / "index.ts").exists()
+
+        hook_content = (react_dir / "useNexaPy.ts").read_text(encoding="utf-8")
+        assert f"v{__version__}" in hook_content
+        assert "export function useNexaPy" in hook_content
+        assert "export interface UseNexaPyReturn" in hook_content
+        assert "send: (prompt: string" in hook_content
+        assert "data: AIResponse | null" in hook_content
+        assert "loading: boolean" in hook_content
+        assert "error: string | null" in hook_content
+        assert "reset: () => void" in hook_content
+
+
 def test_sdk_custom_ai_path_option():
     with tempfile.TemporaryDirectory() as tmp_dir:
         out_path = Path(tmp_dir) / "custom_sdk"
@@ -77,6 +107,11 @@ def test_generate_sdk_orchestrator_aliases_and_validation():
         ts_path = tmp_path / "ts_alias"
         generate_sdk("ts", ts_path)
         assert (ts_path / "client.ts").exists()
+
+        # React alias
+        react_path = tmp_path / "react_alias"
+        generate_sdk("react", react_path)
+        assert (react_path / "react" / "useNexaPy.ts").exists()
 
         # Invalid language error
         with pytest.raises(ValueError) as exc_info:
@@ -103,6 +138,15 @@ def test_cli_sdk_generate_typescript_custom_path():
         assert "Successfully generated typescript SDK" in result.output
         client_content = (out_dir / "client.ts").read_text(encoding="utf-8")
         assert "/my-custom-path" in client_content
+
+
+def test_cli_sdk_generate_react():
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        out_dir = Path(tmp_dir) / "my_react_sdk"
+        result = runner.invoke(app, ["sdk", "generate", "-l", "react", "-o", str(out_dir)])
+        assert result.exit_code == 0
+        assert "Successfully generated react SDK" in result.output
+        assert (out_dir / "react" / "useNexaPy.ts").exists()
 
 
 def test_cli_sdk_generate_invalid_language():

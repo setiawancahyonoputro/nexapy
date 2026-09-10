@@ -5,7 +5,7 @@ from nexapy.app import AIChatRequest
 
 
 def test_version_single_source():
-    assert __version__ == "0.1.0"
+    assert __version__ == "0.2.0.dev0"
     app = NexaPy()
     assert app.version == __version__
 

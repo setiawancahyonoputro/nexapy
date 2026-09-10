@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Union
 from .javascript import generate_javascript_sdk
 from .typescript import generate_typescript_sdk
+from .react import generate_react_sdk
 
 
 def generate_sdk(
@@ -15,7 +16,7 @@ def generate_sdk(
     """
     Generate client SDK code for the specified language.
     
-    Supported languages: 'javascript' ('js'), 'typescript' ('ts').
+    Supported languages: 'javascript' ('js'), 'typescript' ('ts'), 'react' ('react-hooks').
     Raises ValueError for unsupported languages.
     """
     target_lang = (lang or "").strip().lower()
@@ -25,9 +26,11 @@ def generate_sdk(
         generate_javascript_sdk(path, base_url=base_url, ai_path=ai_path)
     elif target_lang in ("typescript", "ts"):
         generate_typescript_sdk(path, base_url=base_url, ai_path=ai_path)
+    elif target_lang in ("react", "react-hooks"):
+        generate_react_sdk(path, base_url=base_url, ai_path=ai_path)
     else:
         raise ValueError(
-            f"Unsupported language '{lang}'. Supported values are 'javascript' ('js') and 'typescript' ('ts')."
+            f"Unsupported language '{lang}'. Supported values are 'javascript' ('js'), 'typescript' ('ts'), and 'react'."
         )
 
     return path

@@ -1,5 +1,6 @@
 """NexaPy TypeScript Client SDK Generator."""
 
+import json
 from pathlib import Path
 from nexapy import __version__
 
@@ -11,8 +12,8 @@ def generate_typescript_sdk(
 ) -> None:
     """Generate TypeScript NexaPyClient SDK (`client.ts`, `types.ts`, `index.ts`)."""
     output_dir.mkdir(parents=True, exist_ok=True)
-    clean_base_url = base_url.rstrip("/")
-    clean_ai_path = "/" + ai_path.lstrip("/")
+    clean_base_url_json = json.dumps(base_url.rstrip("/"))
+    clean_ai_path_json = json.dumps("/" + ai_path.lstrip("/"))
 
     # 1. types.ts
     types_ts = f'''/**
@@ -61,9 +62,9 @@ export class NexaPyClient {{
   private aiPath: string;
 
   constructor(options: NexaPyClientOptions = {{}}) {{
-    this.baseURL = (options.baseURL || "{clean_base_url}").replace(/\\/+$/, "");
+    this.baseURL = (options.baseURL || {clean_base_url_json}).replace(/\\/+$/, "");
     this.timeout = options.timeout !== undefined ? options.timeout : 30000;
-    this.aiPath = "{clean_ai_path}";
+    this.aiPath = {clean_ai_path_json};
   }}
 
   async chat(prompt: string, options: AIChatOptions = {{}}): Promise<AIResponse> {{
