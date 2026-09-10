@@ -44,10 +44,10 @@ dev = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/nexapy/nexapy"
-Repository = "https://github.com/nexapy/nexapy.git"
-Documentation = "https://github.com/nexapy/nexapy#readme"
-Issues = "https://github.com/nexapy/nexapy/issues"
+Homepage = "https://github.com/setiawancahyonoputro/nexapy"
+Repository = "https://github.com/setiawancahyonoputro/nexapy.git"
+Documentation = "https://github.com/setiawancahyonoputro/nexapy#readme"
+Issues = "https://github.com/setiawancahyonoputro/nexapy/issues"
 
 [project.scripts]
 nexapy = "nexapy.cli:app"
