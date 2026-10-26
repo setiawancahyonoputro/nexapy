@@ -1,13 +1,13 @@
 from nexapy import NexaPy
 
-app = NexaPy(title="Basic NexaPy Example App")
+app = NexaPy(title="Basic NexaPy Application")
 
 
 @app.get("/")
-def home():
+def read_root():
     return {"message": "Welcome to NexaPy Framework!"}
 
 
-@app.get("/ping")
-def ping():
-    return {"ping": "pong"}
+@app.get("/health")
+def health():
+    return {"status": "ok", "app": "basic_app"}

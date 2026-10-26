@@ -15,13 +15,14 @@ def workflow(func: Callable[..., Any]) -> Callable[..., Any]:
 def workflow(
     name_or_func: Union[str, Callable[..., Any], None] = None,
     description: Optional[str] = None,
+    schedule: Optional[str] = None,
 ) -> Any:
     """
     Decorator to register a function as a NexaPy workflow.
     Returns the original decorated function so it remains directly callable.
 
     Usage:
-        @workflow("hello")
+        @workflow("hello", description="Greetings workflow", schedule="0 8 * * *")
         async def hello(ctx):
             return {"message": "Hello from workflow"}
 
@@ -32,12 +33,13 @@ def workflow(
     if callable(name_or_func):
         func = name_or_func
         wf_name = func.__name__
-        workflow_registry.register(name=wf_name, func=func, description=description)
+        workflow_registry.register(name=wf_name, func=func, description=description, schedule=schedule)
         return func
 
     def decorator(func: Callable[..., Any]) -> Callable[..., Any]:
         wf_name = name_or_func if isinstance(name_or_func, str) and name_or_func.strip() else func.__name__
-        workflow_registry.register(name=wf_name, func=func, description=description)
+        workflow_registry.register(name=wf_name, func=func, description=description, schedule=schedule)
         return func
 
     return decorator
+

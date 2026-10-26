@@ -2,6 +2,7 @@ import pytest
 from fastapi.testclient import TestClient
 from nexapy import NexaPy, __version__
 from nexapy.app import AIChatRequest
+from nexapy.security import HMACVerifier
 
 
 def test_version_single_source():
@@ -50,11 +51,9 @@ def test_ai_route_decorator_post_only_default():
         pass
 
     client = TestClient(app.fastapi)
-    # Default is POST-only, GET should return Method Not Allowed (405)
     res_get = client.get("/chat")
     assert res_get.status_code == 405
 
-    # POST with missing prompt returns 422 Unprocessable Entity due to required Pydantic schema
     res_post_err = client.post("/chat", json={})
     assert res_post_err.status_code == 422
 
@@ -86,7 +85,6 @@ def test_ai_route_string_prompt_modification():
         return f"Modified: {prompt}"
 
     client = TestClient(app.fastapi)
-    # Handler modifies prompt string, route executes chat engine (which fails cleanly without API keys)
     res = client.post("/mod_chat", json={"prompt": "Input text"})
     assert res.status_code in (200, 503)
     data = res.json()
@@ -94,3 +92,39 @@ def test_ai_route_string_prompt_modification():
     assert "provider" in data
     assert "success" in data
 
+
+def test_app_mount_workflows_basic_and_secured():
+    from nexapy import workflow
+    from nexapy.automation import workflow_registry
+
+    workflow_registry.clear()
+
+    @workflow("echo-service")
+    async def echo_service(ctx):
+        msg = ctx.input.get("message", "empty")
+        return {"echo": msg}
+
+    app = NexaPy()
+    app.mount_workflows(prefix="/workflows", api_key="secret-api-key")
+    client = TestClient(app.fastapi)
+
+    # 1. Without API key -> 401 Unauthorized
+    res_unauth = client.post("/workflows/echo-service", json={"message": "test"})
+    assert res_unauth.status_code == 401
+
+    # 2. With valid API key -> 200 OK
+    res_auth = client.post("/workflows/echo-service", json={"message": "Hello NexaPy"}, headers={"X-NexaPy-Key": "secret-api-key"})
+    assert res_auth.status_code == 200
+    assert res_auth.json()["result"] == {"echo": "Hello NexaPy"}
+
+    # 3. Discover schema endpoint
+    res_schema = client.get("/workflows/_schema")
+    assert res_schema.status_code == 200
+    assert res_schema.json()["count"] == 1
+
+    # 4. Batch execution endpoint
+    res_batch = client.post("/workflows/_batch", json=[{"workflow": "echo-service", "input": {"message": "batch"}}], headers={"X-NexaPy-Key": "secret-api-key"})
+    assert res_batch.status_code == 200
+    assert res_batch.json()["batch_results"][0]["result"] == {"echo": "batch"}
+
+    workflow_registry.clear()

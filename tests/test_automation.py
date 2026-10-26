@@ -256,3 +256,130 @@ async def test_workflow_ctx_ai_action():
         assert res["provider"] == "freemodel"
         mock_chat.assert_called_once()
 
+
+def test_workflow_input_validation_non_dict():
+    """Verify input_data that is not a dictionary raises TypeError."""
+    with pytest.raises(TypeError) as exc_info:
+        WorkflowContext(input_data=["invalid", "list"])
+    assert "Workflow input must be a dictionary" in str(exc_info.value)
+
+
+def test_workflow_signature_validation():
+    """Verify workflow registration rejects functions with > 1 parameter."""
+    with pytest.raises(TypeError) as exc_info:
+        @workflow("too_many_args")
+        def bad_workflow(a, b, c):
+            return a + b + c
+    assert "only 0 or 1 parameter (ctx) is allowed" in str(exc_info.value)
+
+
+def test_workflow_metadata_description_and_schedule():
+    """Verify @workflow stores description and schedule metadata."""
+    @workflow("scheduled_flow", description="Daily reporter", schedule="0 8 * * *")
+    async def scheduled_flow(ctx):
+        return "done"
+
+    wf = workflow_registry.get("scheduled_flow")
+    assert wf is not None
+    assert wf.description == "Daily reporter"
+    assert wf.schedule == "0 8 * * *"
+
+
+@pytest.mark.asyncio
+async def test_workflow_ctx_http_action():
+    """Verify ctx.http provides async get, post, put, patch, delete methods using httpx."""
+    from unittest.mock import AsyncMock, patch
+    import httpx
+
+    mock_response = httpx.Response(200, json={"status": "success", "id": 123})
+
+    @workflow("http_test")
+    async def http_test(ctx):
+        r_get = await ctx.http.get("https://api.example.com/item/1", timeout=10)
+        r_post = await ctx.http.post("https://api.example.com/item", json={"name": "test"})
+        return {"get": r_get.json(), "post": r_post.json()}
+
+    with patch("httpx.AsyncClient.request", new_callable=AsyncMock) as mock_req:
+        mock_req.return_value = mock_response
+        w_runner = WorkflowRunner()
+        res = await w_runner.run_async("http_test")
+        assert res["get"] == {"status": "success", "id": 123}
+        assert res["post"] == {"status": "success", "id": 123}
+        assert mock_req.call_count == 2
+
+
+@pytest.mark.asyncio
+async def test_dag_workflow_execution():
+    from nexapy.automation import DAGWorkflow
+
+    dag = DAGWorkflow("pipeline", description="Test DAG pipeline")
+
+    @dag.node("step1")
+    async def step1(ctx):
+        return {"val": 10}
+
+    @dag.node("step2", depends_on=["step1"])
+    def step2(ctx):
+        v = ctx.state["steps"]["step1"]["val"]
+        return {"val": v * 2}
+
+    w_runner = WorkflowRunner()
+    results = await w_runner.run_async(dag)
+    assert results["step1"] == {"val": 10}
+    assert results["step2"] == {"val": 20}
+
+
+def test_transform_action_helpers():
+    ctx = WorkflowContext(input_data={"a": 1, "b": 2, "c": 3})
+
+    picked = ctx.transform.pick(ctx.input, ["a", "c"])
+    assert picked == {"a": 1, "c": 3}
+
+    omitted = ctx.transform.omit(ctx.input, ["b"])
+    assert omitted == {"a": 1, "c": 3}
+
+    mapped = ctx.transform.map_fields(ctx.input, {"a": "alpha", "b": "beta"})
+    assert mapped == {"alpha": 1, "beta": 2, "c": 3}
+
+    rendered = ctx.transform.render_template("Hello {{ name }}!", {"name": "NexaPy"})
+    assert rendered == "Hello NexaPy!"
+
+
+def test_telemetry_sqlite_and_memory_storage():
+    from nexapy.automation import MemoryStorageAdapter, SQLiteStorageAdapter, tracker, WorkflowExecutionLog
+
+    mem_storage = MemoryStorageAdapter()
+    log1 = WorkflowExecutionLog(execution_id="e1", workflow_name="w1", status="SUCCESS", start_time=100.0)
+    mem_storage.save(log1)
+    assert mem_storage.get("e1") is log1
+    assert len(mem_storage.list_recent()) == 1
+
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        db_file = Path(tmp_dir) / "test.db"
+        sql_storage = SQLiteStorageAdapter(db_path=db_file)
+        log2 = WorkflowExecutionLog(execution_id="e2", workflow_name="w2", status="FAILED", start_time=200.0, error="err")
+        sql_storage.save(log2)
+
+        retrieved = sql_storage.get("e2")
+        assert retrieved is not None
+        assert retrieved.execution_id == "e2"
+        assert retrieved.error == "err"
+        assert len(sql_storage.list_recent()) == 1
+
+
+@pytest.mark.asyncio
+async def test_notification_action_send_webhook():
+    from unittest.mock import AsyncMock, patch
+    import httpx
+
+    ctx = WorkflowContext()
+    mock_res = httpx.Response(200)
+
+    with patch("httpx.AsyncClient.post", new_callable=AsyncMock) as mock_post:
+        mock_post.return_value = mock_res
+        success = await ctx.notify.send_webhook("https://webhook.site/test", payload={"event": "test"}, secret="my-secret")
+        assert success is True
+        mock_post.assert_called_once()
+
+
+
