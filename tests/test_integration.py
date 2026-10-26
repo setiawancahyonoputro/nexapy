@@ -15,7 +15,7 @@ def test_full_app_integration():
 
 
 def test_ai_decorator_flow_and_status_codes():
-    app = NexaPy()
+    app = NexaPy(allow_anonymous_ai=True)
 
     @app.ai("/chat")
     async def chat(prompt: str):

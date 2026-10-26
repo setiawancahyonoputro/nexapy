@@ -40,6 +40,16 @@ class WorkflowContext:
         self.state[key] = value
 
     @property
+    def steps(self) -> Dict[str, Any]:
+        """Access step execution outputs in a DAG workflow."""
+        return self.state.get("steps", {})
+
+    @property
+    def run_id(self) -> Optional[str]:
+        """Access workflow execution run ID."""
+        return self.input.get("run_id") or self.state.get("run_id")
+
+    @property
     def http(self):
         """Access NexaPy HTTP Action interface."""
         if self._http_action is None:

@@ -54,6 +54,7 @@ class JobQueue:
         self._idempotency_map: Dict[str, str] = {}
         self._queue: asyncio.Queue[str] = asyncio.Queue()
         self._worker_tasks: List[asyncio.Task] = []
+        self._active_tasks: Dict[str, asyncio.Task] = {}
         self._running = False
 
         if self.db_path:
@@ -208,7 +209,7 @@ class JobQueue:
         return job
 
     def cancel_job(self, job_id: str) -> bool:
-        """Cancel a queued or processing job."""
+        """Cancel a queued or processing job immediately."""
         job = self.get_job(job_id)
         if not job:
             return False
@@ -219,7 +220,69 @@ class JobQueue:
         job.completed_at = time.time()
         job.error = "Job was cancelled by client."
         self._save_job(job)
+
+        # Cancel active async task if in progress (P1 Finding 13)
+        active_task = self._active_tasks.get(job_id)
+        if active_task and not active_task.done():
+            active_task.cancel()
+
         return True
+
+    def claim_next_job(self, worker_id: str = "worker", lease_seconds: float = 60.0) -> Optional[Job]:
+        """
+        Atomically claim a pending QUEUED job or expired lease job in SQLite (P1 Finding 14).
+        Uses BEGIN IMMEDIATE / UPDATE ... WHERE status = 'QUEUED'.
+        """
+        if not self.db_path:
+            return None
+        conn = self._get_connection()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            now = time.time()
+            cursor = conn.execute(
+                """
+                SELECT job_id, workflow_name, input_data, idempotency_key, created_at
+                FROM nexapy_jobs
+                WHERE status = 'QUEUED' OR (status = 'PROCESSING' AND started_at < ?)
+                ORDER BY created_at ASC LIMIT 1
+                """,
+                (now - lease_seconds,),
+            )
+            row = cursor.fetchone()
+            if not row:
+                conn.commit()
+                return None
+
+            job_id = row[0]
+            cursor = conn.execute(
+                """
+                UPDATE nexapy_jobs
+                SET status = 'PROCESSING', started_at = ?
+                WHERE job_id = ? AND (status = 'QUEUED' OR (status = 'PROCESSING' AND started_at < ?))
+                """,
+                (now, job_id, now - lease_seconds),
+            )
+            if cursor.rowcount == 0:
+                conn.rollback()
+                return None
+
+            conn.commit()
+            job = Job(
+                job_id=job_id,
+                workflow_name=row[1],
+                input_data=json.loads(row[2]) if row[2] else {},
+                status="PROCESSING",
+                idempotency_key=row[3],
+                created_at=row[4],
+                started_at=now,
+            )
+            self._jobs[job_id] = job
+            return job
+        except Exception:
+            conn.rollback()
+            return None
+        finally:
+            conn.close()
 
     def get_job(self, job_id: str) -> Optional[Job]:
         """Fetch job state by ID."""
@@ -271,22 +334,49 @@ class JobQueue:
             job.started_at = time.time()
             self._save_job(job)
 
+            current_task = asyncio.current_task()
+            if current_task:
+                self._active_tasks[job_id] = current_task
+
             try:
                 res = await runner.run_async(job.workflow_name, input_data=job.input_data)
-                job.status = "COMPLETED"
-                job.result = res
-            except Exception as err:
-                job.status = "FAILED"
-                job.error = str(err)
-            finally:
+                
+                # P1 Finding 13: Re-check status before completing: do NOT overwrite CANCELLED job!
+                latest_job = self.get_job(job_id)
+                if latest_job and latest_job.status == "CANCELLED":
+                    pass
+                else:
+                    job.status = "COMPLETED"
+                    job.result = res
+                    job.completed_at = time.time()
+                    self._save_job(job)
+            except asyncio.CancelledError:
+                job.status = "CANCELLED"
+                job.error = "Job execution was cancelled."
                 job.completed_at = time.time()
                 self._save_job(job)
+            except Exception as err:
+                latest_job = self.get_job(job_id)
+                if latest_job and latest_job.status == "CANCELLED":
+                    pass
+                else:
+                    job.status = "FAILED"
+                    job.error = str(err)
+                    job.completed_at = time.time()
+                    self._save_job(job)
+            finally:
+                self._active_tasks.pop(job_id, None)
                 self._queue.task_done()
 
     def start_workers(self) -> None:
         """Start async background worker pool and recover any pending jobs."""
         if self._running:
             return
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return  # Defer worker task creation until event loop is active
+
         if self.db_path:
             self.recover_pending_jobs()
         self._running = True

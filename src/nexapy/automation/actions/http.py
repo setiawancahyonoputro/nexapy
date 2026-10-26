@@ -7,45 +7,73 @@ from typing import Any, Dict, List, Optional, Union
 import httpx
 
 
-def is_ssrf_safe_url(url: str, allowed_hosts: Optional[List[str]] = None) -> bool:
+def is_ssrf_safe_url(
+    url: str,
+    allowed_hosts: Optional[List[str]] = None,
+    allow_private_hosts: bool = False,
+) -> bool:
     """
     Validate whether URL is safe from SSRF attacks.
+    Enforces HTTP/HTTPS protocol strictly (rejects ftp://, file://, etc.).
     Blocks localhost, loopback, private RFC 1918/4193 subnets, and cloud metadata (169.254.169.254).
     """
     try:
         parsed = urlparse(url)
+        # P1 Finding 19: Strictly enforce HTTP/HTTPS protocol
+        scheme = (parsed.scheme or "").lower()
+        if scheme not in ("http", "https"):
+            return False
+
         hostname = parsed.hostname
         if not hostname:
             return False
 
-        if allowed_hosts:
-            if hostname in allowed_hosts or any(hostname.endswith(f".{h}") for h in allowed_hosts):
-                return True
-            return False
-
         lower_host = hostname.lower()
-        if lower_host in ("localhost", "127.0.0.1", "::1", "0.0.0.0", "metadata.google.internal") or lower_host.endswith(".local") or lower_host.endswith(".internal"):
+
+        # Always block loopback, metadata services, and internal domains
+        BLOCKED_HOSTNAMES = {
+            "localhost",
+            "127.0.0.1",
+            "::1",
+            "0.0.0.0",
+            "metadata.google.internal",
+            "169.254.169.254",
+        }
+        if lower_host in BLOCKED_HOSTNAMES or lower_host.endswith(".local") or lower_host.endswith(".internal"):
             return False
 
         # If it's an IP literal, validate directly
         try:
             ip = ipaddress.ip_address(lower_host)
-            if ip.is_loopback or ip.is_private or ip.is_link_local or ip.is_reserved or str(ip) == "169.254.169.254":
+            # Cloud metadata and loopback are never safe
+            if ip.is_loopback or ip.is_link_local or ip.is_reserved or str(ip) == "169.254.169.254":
+                return False
+            if ip.is_private and not allow_private_hosts:
+                return False
+            if allowed_hosts and lower_host not in allowed_hosts:
                 return False
             return True
         except ValueError:
             pass
 
-        # If DNS resolves to an IP, verify the resolved IP is safe
+        # If allowed_hosts is specified, verify domain membership
+        if allowed_hosts:
+            host_match = lower_host in allowed_hosts or any(lower_host.endswith(f".{h.lstrip('.')}") for h in allowed_hosts)
+            if not host_match:
+                return False
+
+        # DNS resolution check: verify resolved IP is safe
         try:
             addr_info = socket.getaddrinfo(hostname, None)
             for item in addr_info:
                 ip_str = item[4][0]
                 ip = ipaddress.ip_address(ip_str)
-                if ip.is_loopback or ip.is_private or ip.is_link_local or ip.is_reserved or str(ip) == "169.254.169.254":
+                if ip.is_loopback or ip.is_link_local or ip.is_reserved or str(ip) == "169.254.169.254":
+                    return False
+                if ip.is_private and not allow_private_hosts:
                     return False
         except Exception:
-            # If resolution fails (e.g. mock test domain or offline), ensure it's not a private host or single-label name
+            # Fallback for mock/offline domains
             if lower_host in ("localhost", "local", "internal", "lan", "home") or "." not in lower_host:
                 return False
 

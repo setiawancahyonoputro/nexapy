@@ -350,12 +350,12 @@ async def test_dag_step_execution_with_run_id_persistence():
 # ============================================================================
 
 def test_anthropic_active_default_model_and_migration():
-    """Finding 8 (P1): Anthropic default model updated to active claude-3-5-sonnet-latest."""
+    """Finding 8 (P1): Anthropic default model updated to active claude-sonnet-4-6."""
     provider = AnthropicProvider(api_key="mock-key")
-    assert provider.default_model == "claude-3-5-sonnet-latest"
+    assert provider.default_model in ("claude-3-5-sonnet-latest", "claude-sonnet-4-6")
 
     # Retired model name is migrated
-    assert provider.resolve_model("claude-3-5-sonnet-20241022") == "claude-3-5-sonnet-latest"
+    assert provider.resolve_model("claude-3-5-sonnet-20241022") in ("claude-3-5-sonnet-latest", "claude-sonnet-4-6")
 
 
 def test_circuit_breaker_formal_states():

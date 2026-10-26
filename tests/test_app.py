@@ -59,7 +59,7 @@ def test_ai_route_decorator_post_only_default():
 
 
 def test_ai_route_strict_airesponse_contract():
-    app = NexaPy()
+    app = NexaPy(allow_anonymous_ai=True)
 
     @app.ai("/custom_response")
     async def custom_handler(prompt: str):
@@ -78,7 +78,7 @@ def test_ai_route_strict_airesponse_contract():
 
 
 def test_ai_route_string_prompt_modification():
-    app = NexaPy()
+    app = NexaPy(allow_anonymous_ai=True)
 
     @app.ai("/mod_chat")
     async def mod_chat(prompt: str):

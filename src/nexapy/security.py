@@ -7,20 +7,38 @@ from typing import Any, Callable, Dict, List, Optional, Set, Tuple, Union
 from fastapi import HTTPException, Request, status
 
 
+import threading
+
+
 class NonceTracker:
     """Thread-safe TTL tracker for webhook nonces to prevent replay attacks."""
 
     def __init__(self, ttl_seconds: float = 300.0):
         self.ttl_seconds = ttl_seconds
         self._seen: Dict[str, float] = {}
+        self._lock = threading.Lock()
 
     def has_seen(self, nonce: str) -> bool:
-        self._cleanup()
-        return nonce in self._seen
+        with self._lock:
+            self._cleanup()
+            return nonce in self._seen
+
+    def check_and_add(self, nonce: str) -> bool:
+        """
+        Atomically check if nonce was seen; if not seen, record it and return True.
+        If already seen (replayed), return False.
+        """
+        with self._lock:
+            self._cleanup()
+            if nonce in self._seen:
+                return False
+            self._seen[nonce] = time.time()
+            return True
 
     def add(self, nonce: str) -> None:
-        self._cleanup()
-        self._seen[nonce] = time.time()
+        with self._lock:
+            self._cleanup()
+            self._seen[nonce] = time.time()
 
     def _cleanup(self) -> None:
         now = time.time()
@@ -52,16 +70,24 @@ class HMACVerifier:
         timestamp: Optional[Union[str, int]] = None,
         max_age_seconds: float = 300.0,
         nonce: Optional[str] = None,
+        enforce_timestamp: bool = False,
     ) -> bool:
         """
         Verify payload HMAC signature against expected signature.
-        Includes timestamp expiration checks and nonce deduplication.
+        Includes timestamp expiration checks and atomic nonce deduplication.
+        Strict verification: if timestamp is provided or enforced, no legacy fallback is permitted.
+        Nonce is recorded ONLY after signature is verified.
         """
         if not secret or not signature:
             return False
 
-        # Replay protection: Check timestamp drift
-        if timestamp is not None:
+        clean_sig = signature.replace("sha256=", "").strip()
+
+        # Check timestamp if provided or enforced
+        has_timestamp = timestamp is not None
+        if has_timestamp or enforce_timestamp:
+            if not has_timestamp:
+                return False
             try:
                 ts_val = float(timestamp)
                 now = time.time()
@@ -70,23 +96,22 @@ class HMACVerifier:
             except (ValueError, TypeError):
                 return False
 
-        # Replay protection: Check nonce uniqueness
-        if nonce:
-            if _global_nonce_tracker.has_seen(nonce):
-                return False
-            _global_nonce_tracker.add(nonce)
-
-        clean_sig = signature.replace("sha256=", "").strip()
-
-        # Check timestamped signature first if timestamp provided
-        if timestamp is not None:
+            # Strict check: verify timestamped signature ONLY - NO legacy raw fallback
             expected_with_ts = HMACVerifier.compute_signature(secret, payload, timestamp=timestamp)
-            if hmac.compare_digest(expected_with_ts.lower(), clean_sig.lower()):
-                return True
+            if not hmac.compare_digest(expected_with_ts.lower(), clean_sig.lower()):
+                return False
+        else:
+            # Fallback check on raw payload only when no timestamp is supplied and timestamp not enforced
+            expected_raw = HMACVerifier.compute_signature(secret, payload)
+            if not hmac.compare_digest(expected_raw.lower(), clean_sig.lower()):
+                return False
 
-        # Fallback check on raw payload for standard webhook payloads
-        expected_raw = HMACVerifier.compute_signature(secret, payload)
-        return hmac.compare_digest(expected_raw.lower(), clean_sig.lower())
+        # Replay protection: Check and record nonce ONLY after signature is confirmed valid!
+        if nonce:
+            if not _global_nonce_tracker.check_and_add(nonce):
+                return False
+
+        return True
 
 
 def verify_n8n_signature_guard(
@@ -113,7 +138,7 @@ def verify_n8n_signature_guard(
         nonce_header = request.headers.get("X-NexaPy-Nonce") or request.headers.get("x-nexapy-nonce")
         body = await request.body()
         if not HMACVerifier.verify_signature(
-            secret, body, sig_header, timestamp=ts_header, max_age_seconds=max_age_seconds, nonce=nonce_header
+            secret, body, sig_header, timestamp=ts_header, max_age_seconds=max_age_seconds, nonce=nonce_header, enforce_timestamp=enforce_timestamp
         ):
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
@@ -141,6 +166,7 @@ class AIAuthGuard:
     """
     Authentication & Usage Quota Guard protecting AI completion endpoints from unauthorized access
     and accidental budget exhaustion.
+    Fails closed by default when unconfigured unless allow_anonymous is explicitly True.
     """
 
     def __init__(
@@ -148,11 +174,13 @@ class AIAuthGuard:
         valid_keys: Optional[List[str]] = None,
         max_requests_per_minute: int = 60,
         token_limit: Optional[int] = None,
+        allow_anonymous: bool = False,
     ):
         self.valid_keys: Set[str] = set(valid_keys or [])
         self.limiter = RateLimiter(max_requests=max_requests_per_minute, window_seconds=60.0)
         self.token_usage: Dict[str, int] = {}
         self.token_limit = token_limit
+        self.allow_anonymous = allow_anonymous
 
     def is_authorized(self, request: Request) -> Tuple[bool, Optional[str], Optional[str]]:
         """
@@ -167,7 +195,11 @@ class AIAuthGuard:
 
         if self.valid_keys:
             if not provided_key or provided_key not in self.valid_keys:
-                return False, None, "Invalid or missing X-NexaPy-Key header."
+                if not self.allow_anonymous:
+                    return False, None, "Invalid or missing X-NexaPy-Key header."
+        else:
+            if not self.allow_anonymous:
+                return False, None, "AI endpoint authentication required. Configure an API key or enable allow_anonymous_ai=True."
 
         key_id = provided_key or (request.client.host if request.client else "unknown")
 

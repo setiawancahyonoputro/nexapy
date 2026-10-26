@@ -1,6 +1,6 @@
 import asyncio
 from typing import Any, AsyncGenerator, Dict, List, Optional
-from .base import AIResponse, BaseProvider
+from .base import AIResponse, BaseProvider, CircuitBreakerState
 from .providers.freemodel import FreeModelProvider
 from .providers.gemini import GeminiProvider
 from .providers.openai import OpenAIProvider
@@ -42,7 +42,7 @@ class AIRouter:
         openai_model = self.config.get("ai.openai.model", "gpt-4o-mini")
 
         anthropic_key = self.config.get("ANTHROPIC_API_KEY")
-        anthropic_model = self.config.get("ai.anthropic.model", "claude-3-5-sonnet-latest")
+        anthropic_model = self.config.get("ai.anthropic.model", "claude-sonnet-4-6")
 
         deepseek_key = self.config.get("DEEPSEEK_API_KEY")
         deepseek_model = self.config.get("ai.deepseek.model", "deepseek-chat")
@@ -95,18 +95,35 @@ class AIRouter:
 
         if target == "auto":
             errors: List[str] = []
-            # Sort providers prioritizing healthy ones
-            candidate_providers = [p for p in self.priority if p in self.providers]
-            healthy_providers = [p for p in candidate_providers if self.providers[p].is_healthy()]
-            unhealthy_providers = [p for p in candidate_providers if not self.providers[p].is_healthy()]
-            ordered_candidates = healthy_providers + unhealthy_providers
+            # P1 Finding 11: Circuit breaker must NEVER call providers in OPEN state
+            candidate_providers = [
+                p for p in self.priority
+                if p in self.providers and self.providers[p].circuit_state != CircuitBreakerState.OPEN
+            ]
+
+            if not candidate_providers:
+                return AIResponse(
+                    text="",
+                    provider="auto",
+                    model="circuit_breaker",
+                    success=False,
+                    error="Auto routing failed: all available AI providers currently have OPEN circuit breakers in cooldown.",
+                )
+
+            # Prioritize CLOSED over HALF_OPEN trial probing
+            healthy_closed = [p for p in candidate_providers if self.providers[p].circuit_state == CircuitBreakerState.CLOSED]
+            half_open = [p for p in candidate_providers if self.providers[p].circuit_state == CircuitBreakerState.HALF_OPEN]
+            ordered_candidates = healthy_closed + half_open
 
             for p_name in ordered_candidates:
                 p_instance = self.providers.get(p_name)
                 if not p_instance:
                     continue
 
-                for attempt in range(max_attempts):
+                # HALF_OPEN permits exactly 1 single controlled trial attempt
+                eff_attempts = 1 if p_instance.circuit_state == CircuitBreakerState.HALF_OPEN else max_attempts
+
+                for attempt in range(eff_attempts):
                     res = await p_instance.generate(
                         prompt,
                         reasoning=reasoning,
@@ -124,10 +141,10 @@ class AIRouter:
                         errors.append(f"{p_name}: {res.error}")
                         break
 
-                    if attempt < max_attempts - 1:
+                    if attempt < eff_attempts - 1:
                         await asyncio.sleep(0.5)
                     else:
-                        errors.append(f"{p_name} (after {max_attempts} attempts): {res.error}")
+                        errors.append(f"{p_name} (after {eff_attempts} attempts): {res.error}")
 
             return AIResponse(
                 text="",
@@ -139,8 +156,19 @@ class AIRouter:
 
         if target in self.providers:
             p_instance = self.providers[target]
+            # P1 Finding 11: Reject call immediately if circuit breaker is OPEN
+            if p_instance.circuit_state == CircuitBreakerState.OPEN:
+                return AIResponse(
+                    text="",
+                    provider=target,
+                    model="circuit_breaker",
+                    success=False,
+                    error=f"Circuit breaker is OPEN for provider '{target}'. Call rejected during cooldown.",
+                )
+
+            eff_attempts = 1 if p_instance.circuit_state == CircuitBreakerState.HALF_OPEN else max_attempts
             res: Optional[AIResponse] = None
-            for attempt in range(max_attempts):
+            for attempt in range(eff_attempts):
                 res = await p_instance.generate(
                     prompt, reasoning=reasoning, temperature=temperature, max_tokens=max_tokens, **kwargs
                 )
@@ -150,7 +178,7 @@ class AIRouter:
                 p_instance.record_failure(res.error)
                 if not is_transient_error(res.error):
                     return res
-                if attempt < max_attempts - 1:
+                if attempt < eff_attempts - 1:
                     await asyncio.sleep(0.5)
 
             if res is not None:
@@ -176,14 +204,21 @@ class AIRouter:
         """
         Stream completion tokens via priority fallback or target provider.
         CRITICAL: Never fall back to another provider once tokens have begun streaming to the client.
+        Never invokes providers in OPEN circuit breaker state.
         """
         target = (provider or self.default_provider).lower()
 
         if target == "auto":
-            candidate_providers = [p for p in self.priority if p in self.providers]
-            healthy_providers = [p for p in candidate_providers if self.providers[p].is_healthy()]
-            unhealthy_providers = [p for p in candidate_providers if not self.providers[p].is_healthy()]
-            ordered_candidates = healthy_providers + unhealthy_providers
+            candidate_providers = [
+                p for p in self.priority
+                if p in self.providers and self.providers[p].circuit_state != CircuitBreakerState.OPEN
+            ]
+            if not candidate_providers:
+                raise RuntimeError("Streaming failed: all providers have OPEN circuit breakers in cooldown.")
+
+            healthy_closed = [p for p in candidate_providers if self.providers[p].circuit_state == CircuitBreakerState.CLOSED]
+            half_open = [p for p in candidate_providers if self.providers[p].circuit_state == CircuitBreakerState.HALF_OPEN]
+            ordered_candidates = healthy_closed + half_open
 
             errors = []
             for p_name in ordered_candidates:
@@ -212,6 +247,9 @@ class AIRouter:
 
         if target in self.providers:
             p_instance = self.providers[target]
+            if p_instance.circuit_state == CircuitBreakerState.OPEN:
+                raise RuntimeError(f"Circuit breaker is OPEN for provider '{target}'. Streaming rejected during cooldown.")
+
             async for chunk in p_instance.stream(
                 prompt,
                 reasoning=reasoning,

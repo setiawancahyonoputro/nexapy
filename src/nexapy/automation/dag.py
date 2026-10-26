@@ -165,6 +165,23 @@ class DAGWorkflow:
         else:
             step_results = ctx.state.get("steps", {})
 
+        # P1 Finding 15: Check step idempotency if run_id provided
+        if run_id and step_name in step_results:
+            return {
+                "workflow": self.name,
+                "step": step_name,
+                "run_id": run_id,
+                "result": step_results[step_name],
+                "status": "cached",
+            }
+
+        # P1 Finding 15: Validate all required dependencies have completed
+        for dep in node.depends_on:
+            if dep not in step_results:
+                raise ValueError(
+                    f"Dependency step '{dep}' has not executed yet for step '{step_name}' in run '{run_id or 'anonymous'}'."
+                )
+
         res = await self._execute_node(node, ctx, step_results)
         step_results[step_name] = res
         ctx.set("steps", step_results)

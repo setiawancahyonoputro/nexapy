@@ -8,7 +8,7 @@ from .runner import runner
 
 
 def _match_cron_field(field_val: int, expr: str, min_val: int, max_val: int) -> bool:
-    """Evaluate a single cron field against an integer value."""
+    """Evaluate a single cron field against an integer value safely."""
     expr = expr.strip()
     if expr == "*":
         return True
@@ -17,10 +17,13 @@ def _match_cron_field(field_val: int, expr: str, min_val: int, max_val: int) -> 
         if len(parts) == 2:
             try:
                 step = int(parts[1])
+                # P1 Finding 18: Reject step <= 0 to prevent ZeroDivisionError
+                if step <= 0:
+                    return False
                 sub_expr = parts[0]
                 start_val = min_val if sub_expr == "*" else int(sub_expr)
                 return (field_val >= start_val) and ((field_val - start_val) % step == 0)
-            except ValueError:
+            except (ValueError, ZeroDivisionError):
                 return False
     if "," in expr:
         return any(_match_cron_field(field_val, sub.strip(), min_val, max_val) for sub in expr.split(","))
@@ -39,34 +42,37 @@ def _match_cron_field(field_val: int, expr: str, min_val: int, max_val: int) -> 
 
 def matches_cron(cron_str: str, dt: Optional[datetime.datetime] = None) -> bool:
     """
-    Evaluate standard 5-field cron expression against datetime.
+    Evaluate standard 5-field cron expression against datetime safely.
     Fields: minute (0-59), hour (0-23), day (1-31), month (1-12), day_of_week (0-6, Sunday=0 or 7).
     """
-    clean = cron_str.strip()
-    fields = clean.split()
-    if len(fields) != 5:
-        return False
+    try:
+        clean = cron_str.strip()
+        fields = clean.split()
+        if len(fields) != 5:
+            return False
 
-    dt = dt or datetime.datetime.now()
-    m_expr, h_expr, d_expr, mo_expr, dow_expr = fields
+        dt = dt or datetime.datetime.now()
+        m_expr, h_expr, d_expr, mo_expr, dow_expr = fields
 
-    if not _match_cron_field(dt.minute, m_expr, 0, 59):
-        return False
-    if not _match_cron_field(dt.hour, h_expr, 0, 23):
-        return False
-    if not _match_cron_field(dt.day, d_expr, 1, 31):
-        return False
-    if not _match_cron_field(dt.month, mo_expr, 1, 12):
-        return False
+        if not _match_cron_field(dt.minute, m_expr, 0, 59):
+            return False
+        if not _match_cron_field(dt.hour, h_expr, 0, 23):
+            return False
+        if not _match_cron_field(dt.day, d_expr, 1, 31):
+            return False
+        if not _match_cron_field(dt.month, mo_expr, 1, 12):
+            return False
 
-    # Standard cron: 0 = Sunday, 1 = Monday, ..., 6 = Saturday (7 is also Sunday)
-    cron_dow = (dt.weekday() + 1) % 7
-    if dow_expr == "7":
-        dow_expr = "0"
-    if not _match_cron_field(cron_dow, dow_expr, 0, 6):
-        return False
+        # Standard cron: 0 = Sunday, 1 = Monday, ..., 6 = Saturday (7 is also Sunday)
+        cron_dow = (dt.weekday() + 1) % 7
+        if dow_expr == "7":
+            dow_expr = "0"
+        if not _match_cron_field(cron_dow, dow_expr, 0, 6):
+            return False
 
-    return True
+        return True
+    except Exception:
+        return False
 
 
 class WorkflowScheduler:

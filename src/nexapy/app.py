@@ -34,6 +34,9 @@ class AIChatRequest(BaseModel):
     max_tokens: Optional[int] = Field(default=None, gt=0, description="Maximum output tokens")
 
 
+from contextlib import asynccontextmanager
+
+
 class NexaPy:
     """NexaPy Framework Web Application Wrapper around FastAPI."""
 
@@ -45,14 +48,33 @@ class NexaPy:
         enable_cors: Optional[bool] = None,
         cors_origins: Optional[List[str]] = None,
         config: Optional[Config] = None,
+        allow_anonymous_ai: Optional[bool] = None,
+        ai_api_keys: Optional[List[str]] = None,
         **kwargs: Any,
     ):
         from . import __version__ as pkg_version
+        from .automation.queue import job_queue
 
         self.version = version or pkg_version
         self.config = config or global_config
         app_title = title or self.config.get("app.name", "NexaPy App")
-        self.fastapi = FastAPI(title=app_title, version=self.version, debug=debug, **kwargs)
+
+        # Lifespan context manager for worker pool and background jobs
+        user_lifespan = kwargs.pop("lifespan", None)
+
+        @asynccontextmanager
+        async def app_lifespan(app_inst: FastAPI):
+            # Startup: recover jobs and start background workers
+            job_queue.start_workers()
+            if user_lifespan:
+                async with user_lifespan(app_inst) as maybe_state:
+                    yield maybe_state
+            else:
+                yield
+            # Shutdown: cleanly terminate workers
+            await job_queue.stop_workers()
+
+        self.fastapi = FastAPI(title=app_title, version=self.version, debug=debug, lifespan=app_lifespan, **kwargs)
 
         self._ai_engine = AI(config=self.config)
         self._ai_limiter = RateLimiter(max_requests=int(self.config.get("ai.rate_limit_requests", 120)))
@@ -63,13 +85,33 @@ class NexaPy:
             or os.getenv("NEXAPY_AI_KEY")
             or os.getenv("NEXAPY_API_KEY")
         )
-        valid_keys = [ai_key] if ai_key else []
+        configured_keys = list(ai_api_keys or [])
+        if ai_key and ai_key not in configured_keys:
+            configured_keys.append(ai_key)
+
         token_limit = self.config.get("ai.token_limit")
+
+        # Allow anonymous AI mode: false by default for strict security (P0 Finding 3)
+        if allow_anonymous_ai is None:
+            anon_cfg = self.config.get("ai.allow_anonymous", self.config.get("ai.allow_anonymous_ai", "false"))
+            self.allow_anonymous_ai = str(anon_cfg).lower() in ("true", "1", "yes")
+        else:
+            self.allow_anonymous_ai = bool(allow_anonymous_ai)
+
         self.ai_guard = AIAuthGuard(
-            valid_keys=valid_keys,
+            valid_keys=configured_keys,
             max_requests_per_minute=int(self.config.get("ai.rate_limit_requests", 120)),
             token_limit=int(token_limit) if token_limit else None,
+            allow_anonymous=self.allow_anonymous_ai,
         )
+
+        # Configure persistent SQLite job queue if configured
+        queue_db = self.config.get("queue.db_path", self.config.get("workflows.db_path", os.getenv("NEXAPY_JOBS_DB")))
+        if queue_db and not job_queue.db_path:
+            job_queue.db_path = str(queue_db)
+            job_queue._init_db()
+
+        self._custom_ai_routes: Dict[str, Callable] = {}
 
         self._setup_cors(enable_cors, cors_origins)
         self._setup_default_routes()
@@ -101,11 +143,56 @@ class NexaPy:
         async def health_check():
             return {"status": "ok", "framework": "NexaPy", "version": self.version}
 
+        # Default standard /ai/chat route (P0 Finding 9)
+        @self.fastapi.post("/ai/chat", tags=["AI Chat"], response_model=AIResponse)
+        async def default_chat_ai(body: AIChatRequest, request: Request):
+            norm_path = "/ai/chat"
+            if norm_path in self._custom_ai_routes:
+                return await self._custom_ai_routes[norm_path](body, request)
+            auth_ok, key_id, err_msg = self.ai_guard.is_authorized(request)
+            if not auth_ok:
+                is_auth_error = (
+                    "invalid" in (err_msg or "").lower()
+                    or "missing" in (err_msg or "").lower()
+                    or "required" in (err_msg or "").lower()
+                )
+                status_code = 401 if is_auth_error else 429
+                return JSONResponse(
+                    status_code=status_code,
+                    content={
+                        "text": "",
+                        "provider": "nexapy",
+                        "model": "none",
+                        "success": False,
+                        "error": err_msg,
+                    },
+                )
+
+            ai_res = await self._ai_engine.chat(
+                body.prompt,
+                provider=body.provider,
+                reasoning=body.reasoning,
+                temperature=body.temperature,
+                max_tokens=body.max_tokens,
+            )
+
+            # Record token usage quota (P1 Finding 10)
+            if ai_res.success and key_id:
+                tokens_count = len(body.prompt.split()) + len((ai_res.text or "").split())
+                self.ai_guard.record_usage(key_id, tokens_count)
+
+            status_code = 200 if ai_res.success else 503
+            return JSONResponse(status_code=status_code, content=ai_res.dict_response())
+
         @self.fastapi.post("/ai/stream", tags=["AI Stream"])
         async def stream_ai(request: Request, body: AIChatRequest):
             auth_ok, key_id, err_msg = self.ai_guard.is_authorized(request)
             if not auth_ok:
-                is_auth_error = "invalid" in (err_msg or "").lower() or "missing" in (err_msg or "").lower()
+                is_auth_error = (
+                    "invalid" in (err_msg or "").lower()
+                    or "missing" in (err_msg or "").lower()
+                    or "required" in (err_msg or "").lower()
+                )
                 status_code = 401 if is_auth_error else 429
                 return JSONResponse(
                     status_code=status_code,
@@ -119,6 +206,7 @@ class NexaPy:
                 )
 
             async def event_generator():
+                generated_words = 0
                 try:
                     async for chunk in self._ai_engine.stream(
                         body.prompt,
@@ -127,7 +215,12 @@ class NexaPy:
                         temperature=body.temperature,
                         max_tokens=body.max_tokens,
                     ):
+                        generated_words += len(chunk.split())
                         yield f"data: {json.dumps({'text': chunk, 'success': True})}\n\n"
+                    # Record usage on stream completion (P1 Finding 10)
+                    if key_id and generated_words > 0:
+                        total_tokens = len(body.prompt.split()) + generated_words
+                        self.ai_guard.record_usage(key_id, total_tokens)
                     yield "data: [DONE]\n\n"
                 except Exception as stream_err:
                     clean_err = sanitize_sensitive_text(str(stream_err))
@@ -150,11 +243,16 @@ class NexaPy:
         route_kwargs = {"response_model": AIResponse, "tags": ["AI Route"], **kwargs}
 
         def decorator(func: Callable) -> Callable:
-            @self.fastapi.api_route(path, methods=route_methods, **route_kwargs)
+            norm_path = "/" + path.strip("/")
+
             async def ai_endpoint(body: AIChatRequest, request: Request):
                 auth_ok, key_id, err_msg = self.ai_guard.is_authorized(request)
                 if not auth_ok:
-                    is_auth_error = "invalid" in (err_msg or "").lower() or "missing" in (err_msg or "").lower()
+                    is_auth_error = (
+                        "invalid" in (err_msg or "").lower()
+                        or "missing" in (err_msg or "").lower()
+                        or "required" in (err_msg or "").lower()
+                    )
                     status_code = 401 if is_auth_error else 429
                     return JSONResponse(
                         status_code=status_code,
@@ -182,6 +280,9 @@ class NexaPy:
                         res = await func() if inspect.iscoroutinefunction(func) else func()
 
                     if isinstance(res, AIResponse):
+                        if res.success and key_id:
+                            tokens_count = len(final_prompt.split()) + len((res.text or "").split())
+                            self.ai_guard.record_usage(key_id, tokens_count)
                         status_code = 200 if res.success else 503
                         return JSONResponse(status_code=status_code, content=res.dict_response())
                     elif isinstance(res, str) and res.strip():
@@ -194,8 +295,16 @@ class NexaPy:
                     temperature=req_temperature,
                     max_tokens=req_max_tokens,
                 )
+                if ai_res.success and key_id:
+                    tokens_count = len(final_prompt.split()) + len((ai_res.text or "").split())
+                    self.ai_guard.record_usage(key_id, tokens_count)
+
                 status_code = 200 if ai_res.success else 503
                 return JSONResponse(status_code=status_code, content=ai_res.dict_response())
+
+            self._custom_ai_routes[norm_path] = ai_endpoint
+            if norm_path != "/ai/chat":
+                self.fastapi.api_route(path, methods=route_methods, **route_kwargs)(ai_endpoint)
 
             return ai_endpoint
         return decorator
@@ -216,6 +325,11 @@ class NexaPy:
         Fails closed when unconfigured unless allow_anonymous is explicitly True.
         """
         from fastapi import Request
+        from .automation.queue import job_queue
+
+        # Ensure background job workers are active (P0 Finding 4)
+        if not job_queue._running:
+            job_queue.start_workers()
 
         route_prefix = "/" + prefix.strip("/")
         limiter = RateLimiter(max_requests=rate_limit_requests)

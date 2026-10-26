@@ -350,14 +350,14 @@ export class NexaPy implements INodeType {
 					responseData = await this.helpers.httpRequest({
 						method: 'GET',
 						url: `${baseUrl}/workflows/executions/${executionId}`,
-						headers,
+						headers: buildHeaders({}),
 						json: true,
 					});
 				} else if (operation === 'listWorkflows') {
 					responseData = await this.helpers.httpRequest({
 						method: 'GET',
 						url: `${baseUrl}/workflows/_schema`,
-						headers,
+						headers: buildHeaders({}),
 						json: true,
 					});
 				} else if (operation === 'healthCheck') {

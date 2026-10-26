@@ -8,14 +8,16 @@ from ..base import BaseProvider, AIResponse
 
 
 ACTIVE_MODELS = {
-    "claude-3-5-sonnet-latest",
+    "claude-sonnet-4-6",
     "claude-3-7-sonnet-latest",
     "claude-3-5-haiku-latest",
     "claude-3-opus-latest",
 }
 
 RETIRED_MODELS_MAP = {
-    "claude-3-5-sonnet-20241022": "claude-3-5-sonnet-latest",
+    "claude-3-5-sonnet-latest": "claude-sonnet-4-6",
+    "claude-3-5-sonnet-20241022": "claude-sonnet-4-6",
+    "claude-3-5-sonnet-20240620": "claude-sonnet-4-6",
 }
 
 
@@ -25,7 +27,7 @@ class AnthropicProvider(BaseProvider):
     def __init__(
         self,
         api_key: Optional[str] = None,
-        default_model: str = "claude-3-5-sonnet-latest",
+        default_model: str = "claude-sonnet-4-6",
         base_url: str = "https://api.anthropic.com/v1",
     ):
         super().__init__(name="anthropic")

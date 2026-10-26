@@ -184,7 +184,7 @@ def test_cli_sdk_generate_invalid_language():
 
 def test_sdk_fastapi_default_route_alignment():
     """Verify default route registered by NexaPy app matches default route used by generated SDK."""
-    nexa = NexaPy()
+    nexa = NexaPy(allow_anonymous_ai=True)
 
     @nexa.ai()  # Defaults to /ai/chat
     async def chat(prompt: str):

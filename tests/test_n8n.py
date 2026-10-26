@@ -40,8 +40,10 @@ def test_export_n8n_webhook_workflow():
     http_node = n8n_data["nodes"][1]
     assert http_node["type"] == "n8n-nodes-base.httpRequest"
     assert http_node["parameters"]["url"] == "http://localhost:8000/workflows/webhook-flow"
-    assert http_node["parameters"]["sendHeaders"] is True
-    assert http_node["parameters"]["headerParameters"]["parameters"][0]["value"] == "secret-key"
+    assert "headerParameters" not in http_node.get("parameters", {})
+    assert http_node["parameters"]["authentication"] == "genericCredentialType"
+    assert http_node["parameters"]["genericAuthType"] == "httpHeaderAuth"
+    assert "httpHeaderAuth" in http_node["credentials"]
 
 
 def test_export_n8n_scheduled_workflow():
