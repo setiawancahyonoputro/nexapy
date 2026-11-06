@@ -269,8 +269,12 @@ class DAGStateStore:
     ) -> bool:
         """
         Atomically persist a step execution output with mandatory fencing token check.
-        Rejects any attempt to overwrite an actively claimed step without a valid claim_token (P0 Finding V7).
+        Requires a valid claim_token; returns False if claim_token is missing, expired,
+        or preempted by another worker.
         """
+        if not claim_token:
+            return False
+
         key = (tenant_id, workflow_name, run_id)
         step_key = (tenant_id, workflow_name, run_id, step_name)
         now = time.time()
@@ -280,46 +284,20 @@ class DAGStateStore:
             conn = sqlite3.connect(self.db_path, timeout=10.0)
             try:
                 conn.execute("BEGIN IMMEDIATE")
-                if claim_token is not None:
-                    # Fencing token enforcement: ONLY update if status is RUNNING and claim_token matches!
-                    cursor = conn.execute(
-                        """
-                        UPDATE nexapy_dag_states
-                        SET result = ?, status = ?, error = ?, updated_at = ?
-                        WHERE tenant_id = ? AND workflow_name = ? AND run_id = ? AND step_name = ?
-                          AND status = 'RUNNING' AND claim_token = ?
-                        """,
-                        (result_json, status, error, now, tenant_id, workflow_name, run_id, step_name, claim_token),
-                    )
-                    conn.commit()
-                    if cursor.rowcount == 0:
-                        # Fencing check failed: lease expired or preempted!
-                        return False
-                else:
-                    # Without claim_token, check if step is actively claimed; if so, reject overwrite!
-                    cursor = conn.execute(
-                        "SELECT status, claim_token FROM nexapy_dag_states WHERE tenant_id = ? AND workflow_name = ? AND run_id = ? AND step_name = ?",
-                        (tenant_id, workflow_name, run_id, step_name),
-                    )
-                    row = cursor.fetchone()
-                    if row and row[0] == "RUNNING":
-                        conn.commit()
-                        return False
-
-                    conn.execute(
-                        """
-                        INSERT INTO nexapy_dag_states
-                        (tenant_id, workflow_name, run_id, step_name, result, status, error, updated_at)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                        ON CONFLICT(tenant_id, workflow_name, run_id, step_name) DO UPDATE SET
-                            result=excluded.result,
-                            status=excluded.status,
-                            error=excluded.error,
-                            updated_at=excluded.updated_at
-                        """,
-                        (tenant_id, workflow_name, run_id, step_name, result_json, status, error, now),
-                    )
-                    conn.commit()
+                # Fencing token enforcement: ONLY update if status is RUNNING and claim_token matches!
+                cursor = conn.execute(
+                    """
+                    UPDATE nexapy_dag_states
+                    SET result = ?, status = ?, error = ?, updated_at = ?
+                    WHERE tenant_id = ? AND workflow_name = ? AND run_id = ? AND step_name = ?
+                      AND status = 'RUNNING' AND claim_token = ?
+                    """,
+                    (result_json, status, error, now, tenant_id, workflow_name, run_id, step_name, claim_token),
+                )
+                conn.commit()
+                if cursor.rowcount == 0:
+                    # Fencing check failed: lease expired or preempted!
+                    return False
             except Exception:
                 conn.rollback()
                 return False
@@ -327,16 +305,12 @@ class DAGStateStore:
                 conn.close()
 
         with self._lock:
-            if claim_token is not None:
-                if step_key not in self._step_records:
-                    return False
-                existing = self._step_records[step_key]
-                if existing.get("claim_token") != claim_token or existing.get("status") != "RUNNING":
-                    return False
-            else:
-                if step_key in self._step_records and self._step_records[step_key].get("status") == "RUNNING":
-                    # Actively claimed! Reject unauthenticated overwrite
-                    return False
+            # Memory fencing check: step must be actively claimed by this claim_token and RUNNING
+            if step_key not in self._step_records:
+                return False
+            existing = self._step_records[step_key]
+            if existing.get("claim_token") != claim_token or existing.get("status") != "RUNNING":
+                return False
 
             if key not in self._memory_store:
                 self._memory_store[key] = {}
@@ -614,14 +588,15 @@ class DAGWorkflow:
             else None
         )
         if sec_tenant:
-            # Trusted server security context always takes precedence over untrusted input
             tenant_id = sec_tenant
+            if isinstance(ctx.input, dict) and "tenant_id" in ctx.input and ctx.input["tenant_id"] != sec_tenant:
+                raise ValueError(
+                    f"Tenant identity mismatch: input payload tenant '{ctx.input['tenant_id']}' does not match authenticated tenant '{sec_tenant}'."
+                )
         else:
-            tenant_id = (
-                getattr(ctx, "tenant_id", None)
-                or (ctx.input.get("tenant_id") if isinstance(ctx.input, dict) else None)
-                or "default"
-            )
+            if isinstance(ctx.input, dict) and "tenant_id" in ctx.input and ctx.input["tenant_id"] != "default":
+                raise PermissionError("Untrusted tenant_id in request payload is not permitted without authenticated security context.")
+            tenant_id = getattr(ctx, "tenant_id", None) or "default"
 
         raw_run_id = (
             (ctx.input.get("run_id") if isinstance(ctx.input, dict) else None)
