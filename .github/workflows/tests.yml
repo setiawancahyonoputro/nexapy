@@ -63,11 +63,11 @@ jobs:
       - name: Verify TypeScript SDK Generation & Compilation
         run: |
           nexapy sdk generate --lang typescript --output dist_sdk_ts
-          npx tsc --noEmit --target ES2020 --moduleResolution node dist_sdk_ts/client.ts
+          npx tsc --noEmit --target ES2020 --moduleResolution bundler --lib ES2020,DOM dist_sdk_ts/client.ts
 
       - name: Verify React Hook SDK Generation & Compilation
         run: |
           nexapy sdk generate --lang react --output dist_sdk_react
-          npx tsc --noEmit --target ES2020 --module ESNext --moduleResolution node --jsx react-jsx --lib ES2020,DOM dist_sdk_react/react/useNexaPy.ts
+          npx tsc --noEmit --target ES2020 --module ESNext --moduleResolution bundler --jsx react-jsx --lib ES2020,DOM dist_sdk_react/react/useNexaPy.ts
 
 
