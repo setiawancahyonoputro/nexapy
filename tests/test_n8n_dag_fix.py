@@ -40,7 +40,7 @@ def test_export_dag_exact_dependencies_and_step_url():
     def step_d():
         return "D"
 
-    n8n_data = export_dag_to_n8n(dag, host="http://localhost:8000")
+    n8n_data = export_dag_to_n8n(dag, host="http://localhost:8000", mode="per_step")
     nodes = {node["name"]: node for node in n8n_data["nodes"]}
     connections = n8n_data["connections"]
 

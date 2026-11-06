@@ -405,7 +405,7 @@ def test_p1_17_dag_n8n_export_propagates_run_id():
         return 1
 
     workflow_registry.register("run_id_dag", dag)
-    exported = export_dag_to_n8n(dag)
+    exported = export_dag_to_n8n(dag, mode="per_step")
     step_node = next(n for n in exported["nodes"] if n["name"] == "Step: node1")
     json_body = step_node["parameters"]["jsonBody"]
     assert "run_id" in json_body

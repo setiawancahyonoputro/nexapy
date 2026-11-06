@@ -72,6 +72,15 @@ class FreeModelProvider(BaseProvider):
                 except Exception:
                     extracted_text = ""
 
+                usage_dict = None
+                if "usage" in data and isinstance(data["usage"], dict):
+                    u = data["usage"]
+                    usage_dict = {
+                        "prompt_tokens": u.get("prompt_tokens", 0),
+                        "completion_tokens": u.get("completion_tokens", 0),
+                        "total_tokens": u.get("total_tokens", 0),
+                    }
+
                 if not extracted_text.strip():
                     return AIResponse(
                         text="",
@@ -79,6 +88,7 @@ class FreeModelProvider(BaseProvider):
                         model=selected_model,
                         success=False,
                         error="Provider returned empty text response",
+                        usage=usage_dict,
                         raw=data,
                     )
 
@@ -87,6 +97,7 @@ class FreeModelProvider(BaseProvider):
                     provider=self.name,
                     model=selected_model,
                     success=True,
+                    usage=usage_dict,
                     raw=data,
                 )
             except Exception as e:

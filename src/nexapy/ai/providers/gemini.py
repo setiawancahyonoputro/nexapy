@@ -98,6 +98,18 @@ class GeminiProvider(BaseProvider):
                 except Exception:
                     extracted_text = ""
 
+                usage_dict = None
+                um = data.get("usageMetadata", {})
+                if um and isinstance(um, dict):
+                    inp = um.get("promptTokenCount", 0)
+                    out = um.get("candidatesTokenCount", 0)
+                    tot = um.get("totalTokenCount", inp + out)
+                    usage_dict = {
+                        "prompt_tokens": inp,
+                        "completion_tokens": out,
+                        "total_tokens": tot,
+                    }
+
                 if not extracted_text.strip():
                     return AIResponse(
                         text="",
@@ -105,6 +117,7 @@ class GeminiProvider(BaseProvider):
                         model=selected_model,
                         success=False,
                         error="Provider returned empty text response",
+                        usage=usage_dict,
                         raw=data,
                     )
 
@@ -113,6 +126,7 @@ class GeminiProvider(BaseProvider):
                     provider=self.name,
                     model=selected_model,
                     success=True,
+                    usage=usage_dict,
                     raw=data,
                 )
             except Exception as e:

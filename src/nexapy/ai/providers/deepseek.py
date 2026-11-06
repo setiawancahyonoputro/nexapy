@@ -73,27 +73,35 @@ class DeepSeekProvider(BaseProvider):
                     message = choices[0].get("message", {})
                     extracted_text = message.get("content", "") or ""
 
+                usage_dict = None
+                if "usage" in data and isinstance(data["usage"], dict):
+                    u = data["usage"]
+                    usage_dict = {
+                        "prompt_tokens": u.get("prompt_tokens", 0),
+                        "completion_tokens": u.get("completion_tokens", 0),
+                        "total_tokens": u.get("total_tokens", 0),
+                    }
+
                 if not extracted_text.strip():
-                    self.record_failure("Provider returned empty text response")
                     return AIResponse(
                         text="",
                         provider=self.name,
                         model=selected_model,
                         success=False,
                         error="Provider returned empty text response",
+                        usage=usage_dict,
                         raw=data,
                     )
 
-                self.record_success()
                 return AIResponse(
                     text=extracted_text,
                     provider=self.name,
                     model=selected_model,
                     success=True,
+                    usage=usage_dict,
                     raw=data,
                 )
             except Exception as e:
-                self.record_failure(str(e))
                 return AIResponse(
                     text="",
                     provider=self.name,

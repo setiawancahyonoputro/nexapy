@@ -138,7 +138,7 @@ export class NexaPyApi implements ICredentialType {{
     (creds_dir / "NexaPyApi.credentials.ts").write_text(creds_code, encoding="utf-8")
 
     # 6. Node Class (NexaPy.node.ts)
-    node_code = """import {
+    node_code = r"""import {
 	IExecuteFunctions,
 	INodeExecutionData,
 	INodeType,
@@ -292,7 +292,7 @@ export class NexaPy implements INodeType {
 		const apiKey = credentials?.apiKey || '';
 		const hmacSecret = credentials?.hmacSecret || '';
 
-		const buildHeaders = (bodyObj: any) => {
+		const buildHeaders = (bodyObj: any = null, method: string = 'POST', reqPath: string = '/') => {
 			const reqHeaders: Record<string, string> = {
 				'Content-Type': 'application/json',
 			};
@@ -303,9 +303,13 @@ export class NexaPy implements INodeType {
 				const crypto = require('crypto');
 				const ts = Math.floor(Date.now() / 1000).toString();
 				const nonce = Math.random().toString(36).substring(2, 12);
-				const payloadStr = JSON.stringify(bodyObj || {});
+				const isBodyEmpty = method.toUpperCase() === 'GET' || method.toUpperCase() === 'HEAD' || bodyObj === undefined || bodyObj === null || (typeof bodyObj === 'object' && Object.keys(bodyObj).length === 0);
+				const rawBody = isBodyEmpty ? '' : (typeof bodyObj === 'string' ? bodyObj : JSON.stringify(bodyObj));
+				const bodyHash = crypto.createHash('sha256').update(rawBody).digest('hex');
+				const canonicalPath = reqPath.startsWith('/') ? reqPath : '/' + reqPath;
+				const stringToSign = `v2\n${ts}\n${nonce}\n${method.toUpperCase()}\n${canonicalPath}\n${bodyHash}`;
 				const sig = crypto.createHmac('sha256', hmacSecret)
-					.update(`${ts}.${payloadStr}`)
+					.update(stringToSign)
 					.digest('hex');
 				reqHeaders['X-NexaPy-Signature'] = `sha256=${sig}`;
 				reqHeaders['X-NexaPy-Timestamp'] = ts;
@@ -329,7 +333,7 @@ export class NexaPy implements INodeType {
 					responseData = await this.helpers.httpRequest({
 						method: 'POST',
 						url: `${baseUrl}/ai/chat`,
-						headers: buildHeaders(reqBody),
+						headers: buildHeaders(reqBody, 'POST', '/ai/chat'),
 						body: reqBody,
 						json: true,
 					});
@@ -341,7 +345,7 @@ export class NexaPy implements INodeType {
 					responseData = await this.helpers.httpRequest({
 						method: 'POST',
 						url: `${baseUrl}/workflows/${workflowName}`,
-						headers: buildHeaders(reqBody),
+						headers: buildHeaders(reqBody, 'POST', `/workflows/${workflowName}`),
 						body: reqBody,
 						json: true,
 					});
@@ -350,20 +354,22 @@ export class NexaPy implements INodeType {
 					responseData = await this.helpers.httpRequest({
 						method: 'GET',
 						url: `${baseUrl}/workflows/executions/${executionId}`,
-						headers: buildHeaders({}),
+						headers: buildHeaders({}, 'GET', `/workflows/executions/${executionId}`),
 						json: true,
 					});
 				} else if (operation === 'listWorkflows') {
+					// headers: buildHeaders({})
 					responseData = await this.helpers.httpRequest({
 						method: 'GET',
 						url: `${baseUrl}/workflows/_schema`,
-						headers: buildHeaders({}),
+						headers: buildHeaders(null, 'GET', '/workflows/_schema'),
 						json: true,
 					});
 				} else if (operation === 'healthCheck') {
 					responseData = await this.helpers.httpRequest({
 						method: 'GET',
 						url: `${baseUrl}/health`,
+						headers: buildHeaders(null, 'GET', '/health'),
 						json: true,
 					});
 				}

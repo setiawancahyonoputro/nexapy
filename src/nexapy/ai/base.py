@@ -12,11 +12,14 @@ class AIResponse(BaseModel):
     model: str = Field(..., description="Model name used for generation")
     success: bool = Field(default=True, description="Whether generation succeeded")
     error: Optional[str] = Field(default=None, description="Error message if generation failed")
+    usage: Optional[Dict[str, int]] = Field(default=None, description="Actual token usage from provider response")
     raw: Optional[Dict[str, Any]] = Field(default=None, exclude=True, description="Raw provider response payload")
 
     def dict_response(self, include_raw: bool = False) -> Dict[str, Any]:
         """Return response formatted as dictionary."""
         data = self.model_dump()
+        if self.usage is None:
+            data.pop("usage", None)
         if include_raw and self.raw is not None:
             data["raw"] = self.raw
         return data

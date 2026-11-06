@@ -52,7 +52,7 @@ def init(
     app_file = target_dir / "app.py"
     starter_code = '''from nexapy import NexaPy
 
-app = NexaPy(title="Hello NexaPy App")
+app = NexaPy(title="Hello NexaPy App", allow_anonymous_ai=True)
 
 
 @app.get("/")
@@ -79,6 +79,7 @@ cors:
 
 ai:
   provider: auto
+  allow_anonymous_ai: true
   priority:
     - freemodel
     - gemini
@@ -95,12 +96,16 @@ FREEMODEL_API_KEY=your_freemodel_api_key_here
 GEMINI_API_KEY=your_gemini_api_key_here
 NEXAPY_AI_PROVIDER=auto
 NEXAPY_CORS_ENABLED=true
+NEXAPY_ALLOW_ANONYMOUS_AI=true
+NEXAPY_API_KEY=dev-secret-api-key
 '''
     env_actual = '''# NexaPy Environment Variables
 FREEMODEL_API_KEY=
 GEMINI_API_KEY=
 NEXAPY_AI_PROVIDER=auto
 NEXAPY_CORS_ENABLED=true
+NEXAPY_ALLOW_ANONYMOUS_AI=true
+NEXAPY_API_KEY=dev-secret-api-key
 '''
     (target_dir / ".env.example").write_text(env_example, encoding="utf-8")
     (target_dir / ".env").write_text(env_actual, encoding="utf-8")
@@ -557,9 +562,9 @@ def n8n_sync(
         console.print(f"\n[bold cyan]Syncing NexaPy workflows to n8n instance at '{n8n_url}'...[/bold cyan]\n")
         for name in target_names:
             wf_data = export_n8n_workflow(name, host=host)
-            res = await client.create_workflow(wf_data)
+            res = await client.sync_workflow(wf_data, upsert=True)
             wf_id = res.get("id") or res.get("data", {}).get("id")
-            console.print(f"Created workflow: [green]{name}[/green] (ID: {wf_id})")
+            console.print(f"Synced workflow: [green]{name}[/green] (ID: {wf_id})")
             if activate and wf_id:
                 try:
                     await client.activate_workflow(wf_id)

@@ -73,7 +73,13 @@ def test_export_dag_to_n8n():
 
     workflow_registry.register("pipeline_flow", dag)
 
-    n8n_data = export_n8n_workflow("pipeline_flow")
+    # Default mode is now single_call for atomic safety
+    default_data = export_n8n_workflow("pipeline_flow")
+    assert default_data["name"] == "NexaPy DAG - pipeline_flow"
+    assert len(default_data["nodes"]) == 2  # Trigger + single_call HTTP node
+
+    # Explicit per_step mode exports each step node
+    n8n_data = export_n8n_workflow("pipeline_flow", mode="per_step")
     assert n8n_data["name"] == "NexaPy DAG - pipeline_flow"
     assert len(n8n_data["nodes"]) == 3  # Trigger + step1 + step2
     assert "Webhook - pipeline_flow" in n8n_data["connections"]

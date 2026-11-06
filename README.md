@@ -2,7 +2,7 @@
 
 [![Python Version](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://python.org)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Build Status](https://img.shields.io/badge/tests-120%20passed-brightgreen.svg)](#)
+[![Build Status](https://img.shields.io/badge/tests-174%20passed-brightgreen.svg)](#)
 [![Version](https://img.shields.io/badge/version-0.3.0.dev0-orange.svg)](#)
 
 **NexaPy** is a modern Python API Framework, Multi-Provider AI Gateway, and Workflow Automation Engine built on top of **FastAPI**. It is designed to bridge backend business logic, multi-model AI routing, asynchronous workflow orchestration, and cross-platform clients (React, Node.js, PHP, Kotlin, Flutter).
@@ -227,12 +227,12 @@ nexapy sdk generate --lang php -o sdk   # Generate client SDK (php, kotlin, flut
 
 ## 🧪 Testing & Code Quality
 
-NexaPy includes an automated test suite covering unit tests, multi-provider routing, HMAC byte verification, DAG dependencies, sensitive data masking, and multi-language SDK generators:
+NexaPy includes an automated test suite covering unit tests, multi-provider routing, HMAC-v2 replay protection, atomic multi-instance job claiming, multi-tenant DAG isolation, sensitive data masking, and multi-language SDK generators:
 
 ```bash
 pytest
 ```
-Result: **102 passed** across unit, security, integration, and concurrency test suites.
+Result: **174 passed** across security, atomic queue concurrency, multi-provider routing, DAG isolation, scheduler leader election, and n8n integration test suites.
 
 ---
 

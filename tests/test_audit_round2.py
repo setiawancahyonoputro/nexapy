@@ -187,7 +187,7 @@ def test_n8n_dag_export_merge_nodes():
     workflow_registry.register("multi_branch_dag", dag)
 
     # When use_merge_nodes=True, an n8n Merge node is created to join branchA and branchB
-    exported = export_dag_to_n8n(dag, use_merge_nodes=True)
+    exported = export_dag_to_n8n(dag, use_merge_nodes=True, mode="per_step")
     node_types = [n["type"] for n in exported["nodes"]]
     assert "n8n-nodes-base.merge" in node_types
 

@@ -92,27 +92,37 @@ class AnthropicProvider(BaseProvider):
                     if isinstance(block, dict) and block.get("type") == "text":
                         extracted_text += block.get("text", "")
 
+                usage_dict = None
+                if "usage" in data and isinstance(data["usage"], dict):
+                    u = data["usage"]
+                    inp = u.get("input_tokens", 0)
+                    out = u.get("output_tokens", 0)
+                    usage_dict = {
+                        "prompt_tokens": inp,
+                        "completion_tokens": out,
+                        "total_tokens": inp + out,
+                    }
+
                 if not extracted_text.strip():
-                    self.record_failure("Provider returned empty text response")
                     return AIResponse(
                         text="",
                         provider=self.name,
                         model=selected_model,
                         success=False,
                         error="Provider returned empty text response",
+                        usage=usage_dict,
                         raw=data,
                     )
 
-                self.record_success()
                 return AIResponse(
                     text=extracted_text,
                     provider=self.name,
                     model=selected_model,
                     success=True,
+                    usage=usage_dict,
                     raw=data,
                 )
             except Exception as e:
-                self.record_failure(str(e))
                 return AIResponse(
                     text="",
                     provider=self.name,

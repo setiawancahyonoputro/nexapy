@@ -37,9 +37,36 @@ def test_hmac_webhook_signature_exact_bytes():
         assert "X-NexaPy-Signature" in captured_headers
 
         sig_header = captured_headers["X-NexaPy-Signature"]
-        # Exact signature verification on captured bytes
-        is_valid = HMACVerifier.verify_signature(secret, captured_content, sig_header)
-        assert is_valid is True, "HMAC signature MUST match exact bytes sent in HTTP request"
+        ts_header = captured_headers.get("X-NexaPy-Timestamp")
+        nonce_header = captured_headers.get("X-NexaPy-Nonce")
+
+        # Strict v2 verification against captured HTTP request
+        is_valid = HMACVerifier.verify_signature(
+            secret,
+            captured_content,
+            sig_header,
+            timestamp=ts_header,
+            nonce=nonce_header,
+            method="POST",
+            path="/webhook",
+            enforce_timestamp=True,
+            enforce_nonce=True,
+        )
+        assert is_valid is True, "HMAC signature MUST match exact bytes sent in HTTP request and pass strict verifier"
+
+        # Tampered nonce MUST be rejected (P0-01 fix)
+        is_tampered = HMACVerifier.verify_signature(
+            secret,
+            captured_content,
+            sig_header,
+            timestamp=ts_header,
+            nonce="tampered_nonce_12345",
+            method="POST",
+            path="/webhook",
+            enforce_timestamp=True,
+            enforce_nonce=True,
+        )
+        assert is_tampered is False, "Reusing signature with different nonce MUST be rejected"
 
 
 def test_sensitive_data_masking():

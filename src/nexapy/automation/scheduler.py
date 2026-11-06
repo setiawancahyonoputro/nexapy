@@ -21,8 +21,14 @@ def _match_cron_field(field_val: int, expr: str, min_val: int, max_val: int) -> 
                 if step <= 0:
                     return False
                 sub_expr = parts[0]
-                start_val = min_val if sub_expr == "*" else int(sub_expr)
-                return (field_val >= start_val) and ((field_val - start_val) % step == 0)
+                if sub_expr == "*":
+                    start_val, end_val = min_val, max_val
+                elif "-" in sub_expr:
+                    rparts = sub_expr.split("-")
+                    start_val, end_val = int(rparts[0]), int(rparts[1])
+                else:
+                    start_val, end_val = int(sub_expr), max_val
+                return (start_val <= field_val <= end_val) and ((field_val - start_val) % step == 0)
             except (ValueError, ZeroDivisionError):
                 return False
     if "," in expr:
@@ -58,17 +64,25 @@ def matches_cron(cron_str: str, dt: Optional[datetime.datetime] = None) -> bool:
             return False
         if not _match_cron_field(dt.hour, h_expr, 0, 23):
             return False
-        if not _match_cron_field(dt.day, d_expr, 1, 31):
-            return False
         if not _match_cron_field(dt.month, mo_expr, 1, 12):
             return False
+        # Standard POSIX / Vixie cron behavior:
+        # If both DOM and DOW are specified (neither is '*'), match if EITHER matches (OR condition)
+        dom_restricted = (d_expr != "*")
+        dow_restricted = (dow_expr != "*")
+        dom_matches = _match_cron_field(dt.day, d_expr, 1, 31)
 
-        # Standard cron: 0 = Sunday, 1 = Monday, ..., 6 = Saturday (7 is also Sunday)
         cron_dow = (dt.weekday() + 1) % 7
         if dow_expr == "7":
             dow_expr = "0"
-        if not _match_cron_field(cron_dow, dow_expr, 0, 6):
-            return False
+        dow_matches = _match_cron_field(cron_dow, dow_expr, 0, 6)
+
+        if dom_restricted and dow_restricted:
+            if not (dom_matches or dow_matches):
+                return False
+        else:
+            if not dom_matches or not dow_matches:
+                return False
 
         return True
     except Exception:
@@ -79,14 +93,50 @@ class WorkflowScheduler:
     """
     In-process scheduler that executes registered workflows matching standard cron
     expressions or human-readable interval schedules (e.g. '10s', '5m', '1h').
+    Supports atomic multi-instance leader election across multiple worker processes when backed by SQLite.
     """
 
-    def __init__(self, check_interval: float = 1.0):
+    def __init__(self, check_interval: float = 1.0, db_path: Optional[str] = None):
         self.check_interval = check_interval
+        self.db_path = db_path
         self._running = False
         self._task: Optional[asyncio.Task] = None
         self._last_runs: Dict[str, float] = {}
         self._last_cron_minutes: Dict[str, str] = {}
+
+    def _acquire_execution_lock(self, workflow_name: str, execution_key: str) -> bool:
+        """Atomic leader election lock across multiple worker instances."""
+        if not self.db_path:
+            return True
+        import sqlite3
+        conn = sqlite3.connect(self.db_path, timeout=5.0)
+        try:
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS nexapy_scheduler_locks (
+                    workflow_name TEXT NOT NULL,
+                    execution_key TEXT NOT NULL,
+                    locked_at REAL NOT NULL,
+                    PRIMARY KEY (workflow_name, execution_key)
+                )
+                """
+            )
+            now = time.time()
+            # Clean up old locks older than 24 hours
+            conn.execute("DELETE FROM nexapy_scheduler_locks WHERE locked_at < ?", (now - 86400,))
+            conn.execute(
+                "INSERT INTO nexapy_scheduler_locks (workflow_name, execution_key, locked_at) VALUES (?, ?, ?)",
+                (workflow_name, execution_key, now),
+            )
+            conn.commit()
+            return True
+        except sqlite3.IntegrityError:
+            return False
+        except Exception:
+            return True
+        finally:
+            conn.close()
 
     def _parse_interval_seconds(self, schedule_str: str) -> Optional[float]:
         """Parse intervals like '10s', '5m', '1h', or 'every 30s'."""
@@ -95,6 +145,10 @@ class WorkflowScheduler:
         if not match:
             return None
         val, unit = float(match.group(1)), match.group(2) or "s"
+        # Validate interval > 0 (P1 Finding 18: Reject 0s/0m to prevent infinite loops)
+        if val <= 0:
+            raise ValueError(f"Schedule interval must be strictly positive (got '{schedule_str}').")
+
         if unit in ("s", "sec"):
             return val
         elif unit in ("m", "min"):
@@ -122,6 +176,9 @@ class WorkflowScheduler:
                 if interval is not None:
                     last_run = self._last_runs.get(wf.name, 0.0)
                     if now - last_run >= interval:
+                        slot_key = f"interval_{int(now // interval)}"
+                        if not self._acquire_execution_lock(wf.name, slot_key):
+                            continue
                         self._last_runs[wf.name] = now
                         asyncio.create_task(self._safe_execute(wf.name))
                     continue
@@ -130,6 +187,9 @@ class WorkflowScheduler:
                 if len(schedule.strip().split()) == 5:
                     if self._last_cron_minutes.get(wf.name) != current_minute_key:
                         if matches_cron(schedule, now_dt):
+                            slot_key = f"cron_{current_minute_key}"
+                            if not self._acquire_execution_lock(wf.name, slot_key):
+                                continue
                             self._last_cron_minutes[wf.name] = current_minute_key
                             self._last_runs[wf.name] = now
                             asyncio.create_task(self._safe_execute(wf.name))

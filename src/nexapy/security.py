@@ -2,64 +2,322 @@
 
 import hashlib
 import hmac
+import sqlite3
+import threading
 import time
+import urllib.parse
+from abc import ABC, abstractmethod
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple, Union
 from fastapi import HTTPException, Request, status
 
 
-import threading
+class BaseNonceStore(ABC):
+    """Abstract base class for replay attack nonce stores."""
 
-
-class NonceTracker:
-    """Thread-safe TTL tracker for webhook nonces to prevent replay attacks."""
-
-    def __init__(self, ttl_seconds: float = 300.0):
-        self.ttl_seconds = ttl_seconds
-        self._seen: Dict[str, float] = {}
-        self._lock = threading.Lock()
-
-    def has_seen(self, nonce: str) -> bool:
-        with self._lock:
-            self._cleanup()
-            return nonce in self._seen
-
-    def check_and_add(self, nonce: str) -> bool:
+    @abstractmethod
+    def check_and_add(self, nonce: str, ttl_seconds: Optional[float] = None, principal: str = "default") -> bool:
         """
         Atomically check if nonce was seen; if not seen, record it and return True.
         If already seen (replayed), return False.
         """
+        pass
+
+    @abstractmethod
+    def has_seen(self, nonce: str, principal: str = "default") -> bool:
+        """Return True if nonce is present and not expired."""
+        pass
+
+    @abstractmethod
+    def add(self, nonce: str, ttl_seconds: Optional[float] = None, principal: str = "default") -> None:
+        """Record a nonce without atomic checking."""
+        pass
+
+    @abstractmethod
+    def clear(self) -> None:
+        """Clear all stored nonces."""
+        pass
+
+
+class MemoryNonceStore(BaseNonceStore):
+    """Thread-safe TTL in-memory store for nonces."""
+
+    def __init__(self, ttl_seconds: float = 300.0):
+        self.ttl_seconds = ttl_seconds
+        self._seen: Dict[Tuple[str, str], float] = {}
+        self._lock = threading.RLock()
+
+    def has_seen(self, nonce: str, principal: str = "default") -> bool:
         with self._lock:
             self._cleanup()
-            if nonce in self._seen:
+            return (principal, nonce) in self._seen
+
+    def check_and_add(self, nonce: str, ttl_seconds: Optional[float] = None, principal: str = "default") -> bool:
+        ttl = ttl_seconds or self.ttl_seconds
+        with self._lock:
+            self._cleanup()
+            key = (principal, nonce)
+            if key in self._seen:
                 return False
-            self._seen[nonce] = time.time()
+            self._seen[key] = time.time() + ttl
             return True
 
-    def add(self, nonce: str) -> None:
+    def add(self, nonce: str, ttl_seconds: Optional[float] = None, principal: str = "default") -> None:
+        ttl = ttl_seconds or self.ttl_seconds
         with self._lock:
             self._cleanup()
-            self._seen[nonce] = time.time()
+            self._seen[(principal, nonce)] = time.time() + ttl
+
+    def clear(self) -> None:
+        with self._lock:
+            self._seen.clear()
 
     def _cleanup(self) -> None:
         now = time.time()
-        expired = [k for k, ts in self._seen.items() if now - ts > self.ttl_seconds]
+        expired = [k for k, exp in self._seen.items() if now > exp]
         for k in expired:
             del self._seen[k]
 
 
-_global_nonce_tracker = NonceTracker()
+class SQLiteNonceStore(BaseNonceStore):
+    """
+    Persistent SQLite-backed nonce store providing atomic replay protection across
+    multiple uvicorn worker processes and server restarts.
+    """
+
+    def __init__(self, db_path: str, ttl_seconds: float = 300.0):
+        self.db_path = db_path
+        self.ttl_seconds = ttl_seconds
+        self._init_db()
+
+    def _get_connection(self) -> sqlite3.Connection:
+        conn = sqlite3.connect(self.db_path, timeout=30.0, check_same_thread=False)
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA busy_timeout=30000")
+        return conn
+
+    def _init_db(self) -> None:
+        conn = self._get_connection()
+        try:
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS nexapy_nonces (
+                    principal TEXT NOT NULL,
+                    nonce TEXT NOT NULL,
+                    expires_at REAL NOT NULL,
+                    PRIMARY KEY (principal, nonce)
+                )
+                """
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_nexapy_nonces_exp ON nexapy_nonces(expires_at)"
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def has_seen(self, nonce: str, principal: str = "default") -> bool:
+        now = time.time()
+        conn = self._get_connection()
+        try:
+            cursor = conn.execute(
+                "SELECT 1 FROM nexapy_nonces WHERE principal = ? AND nonce = ? AND expires_at > ?",
+                (principal, nonce, now),
+            )
+            return cursor.fetchone() is not None
+        finally:
+            conn.close()
+
+    def check_and_add(self, nonce: str, ttl_seconds: Optional[float] = None, principal: str = "default") -> bool:
+        ttl = ttl_seconds or self.ttl_seconds
+        now = time.time()
+        expires_at = now + ttl
+        conn = self._get_connection()
+        try:
+            # Opportunistically cleanup expired nonces
+            try:
+                conn.execute("DELETE FROM nexapy_nonces WHERE expires_at < ?", (now,))
+            except Exception:
+                pass
+
+            try:
+                conn.execute(
+                    "INSERT INTO nexapy_nonces (principal, nonce, expires_at) VALUES (?, ?, ?)",
+                    (principal, nonce, expires_at),
+                )
+                conn.commit()
+                return True
+            except sqlite3.IntegrityError:
+                conn.rollback()
+                return False
+        finally:
+            conn.close()
+
+    def add(self, nonce: str, ttl_seconds: Optional[float] = None, principal: str = "default") -> None:
+        self.check_and_add(nonce, ttl_seconds=ttl_seconds, principal=principal)
+
+    def clear(self) -> None:
+        conn = self._get_connection()
+        try:
+            conn.execute("DELETE FROM nexapy_nonces")
+            conn.commit()
+        finally:
+            conn.close()
+
+
+class NonceTracker(MemoryNonceStore):
+    """
+    Thread-safe TTL tracker for webhook nonces to prevent replay attacks.
+    Preserves backwards-compatible dict-based attribute access.
+    """
+
+    def __init__(self, ttl_seconds: float = 300.0):
+        super().__init__(ttl_seconds=ttl_seconds)
+        self._legacy_seen: Dict[str, float] = {}
+
+    @property
+    def _seen(self) -> Dict[str, float]:  # type: ignore[override]
+        return self._legacy_seen
+
+    @_seen.setter
+    def _seen(self, value: Dict[str, float]) -> None:
+        self._legacy_seen = value
+
+    def has_seen(self, nonce: str, principal: str = "default") -> bool:
+        return super().has_seen(nonce, principal) or nonce in self._legacy_seen
+
+    def check_and_add(self, nonce: str, ttl_seconds: Optional[float] = None, principal: str = "default") -> bool:
+        with self._lock:
+            self._cleanup()
+            if nonce in self._legacy_seen:
+                return False
+            res = super().check_and_add(nonce, ttl_seconds, principal)
+            if res:
+                self._legacy_seen[nonce] = time.time()
+            return res
+
+    def add(self, nonce: str, ttl_seconds: Optional[float] = None, principal: str = "default") -> None:
+        with self._lock:
+            self._cleanup()
+            self._legacy_seen[nonce] = time.time()
+            super().add(nonce, ttl_seconds, principal)
+
+    def clear(self) -> None:
+        with self._lock:
+            self._legacy_seen.clear()
+            super().clear()
+
+    def _cleanup(self) -> None:
+        super()._cleanup()
+        now = time.time()
+        expired = [k for k, ts in self._legacy_seen.items() if now - ts > self.ttl_seconds]
+        for k in expired:
+            del self._legacy_seen[k]
+
+
+_global_nonce_store: BaseNonceStore = NonceTracker()
+_global_nonce_tracker = _global_nonce_store
+
+
+def get_global_nonce_store() -> BaseNonceStore:
+    """Get the active global nonce store (memory or SQLite)."""
+    return _global_nonce_store
+
+
+def set_global_nonce_store(store: BaseNonceStore) -> None:
+    """Set the active global nonce store for replay defense."""
+    global _global_nonce_store, _global_nonce_tracker
+    _global_nonce_store = store
+    _global_nonce_tracker = store
+
+
+def canonicalize_path(path: Optional[str]) -> str:
+    """
+    Normalize URL path and query parameters for canonical HMAC signature computation.
+    Lexicographically sorts query parameters to prevent bypass via parameter reordering
+    or query string injection.
+    """
+    if not path:
+        return "/"
+    p = path.strip()
+    if "?" in p:
+        base_path, query_str = p.split("?", 1)
+    else:
+        base_path, query_str = p, ""
+
+    if not base_path.startswith("/"):
+        base_path = "/" + base_path
+    if len(base_path) > 1 and base_path.endswith("/"):
+        base_path = base_path.rstrip("/")
+
+    if query_str:
+        pairs = urllib.parse.parse_qsl(query_str, keep_blank_values=True)
+        pairs_sorted = sorted(pairs, key=lambda kv: (kv[0], kv[1]))
+        canonical_query = urllib.parse.urlencode(pairs_sorted)
+        return f"{base_path}?{canonical_query}" if canonical_query else base_path
+
+    return base_path
 
 
 class HMACVerifier:
-    """HMAC SHA-256 Signature generator and verifier with timestamp and replay protection."""
+    """HMAC SHA-256 Signature generator and verifier with NexaPy-HMAC-v2 protocol and replay protection."""
 
     @staticmethod
-    def compute_signature(secret: str, payload: bytes, timestamp: Optional[Union[str, int]] = None) -> str:
-        """Compute HMAC SHA-256 signature for payload bytes, optionally prefixing timestamp for replay defense."""
+    def compute_string_to_sign_v2(
+        timestamp: Union[str, int],
+        nonce: str,
+        method: str = "POST",
+        path: str = "/",
+        payload: bytes = b"",
+    ) -> str:
+        """Construct the canonical byte payload string for NexaPy-HMAC-v2."""
+        canonical_path = canonicalize_path(path)
+        payload_bytes = payload if isinstance(payload, bytes) else (payload.encode("utf-8") if isinstance(payload, str) else b"")
+        body_hash = hashlib.sha256(payload_bytes).hexdigest()
+        return f"v2\n{timestamp}\n{nonce}\n{method.upper()}\n{canonical_path}\n{body_hash}"
+
+    @staticmethod
+    def compute_signature_v2(
+        secret: str,
+        timestamp: Union[str, int],
+        nonce: str,
+        method: str = "POST",
+        path: str = "/",
+        payload: bytes = b"",
+    ) -> str:
+        """Compute standard NexaPy-HMAC-v2 signature using HMAC-SHA256."""
+        string_to_sign = HMACVerifier.compute_string_to_sign_v2(
+            timestamp=timestamp, nonce=nonce, method=method, path=path, payload=payload
+        )
+        return hmac.new(secret.encode("utf-8"), string_to_sign.encode("utf-8"), hashlib.sha256).hexdigest()
+
+    @staticmethod
+    def compute_signature(
+        secret: str,
+        payload: bytes = b"",
+        timestamp: Optional[Union[str, int]] = None,
+        nonce: Optional[str] = None,
+        method: str = "POST",
+        path: str = "/",
+        version: str = "v2",
+    ) -> str:
+        """
+        Compute HMAC SHA-256 signature for payload.
+        If version is 'v2' and nonce & timestamp are provided, computes NexaPy-HMAC-v2 signature.
+        Otherwise falls back to timestamp-prefixed or raw payload signature for legacy compatibility.
+        """
+        if version == "v2" and nonce is not None and timestamp is not None:
+            return HMACVerifier.compute_signature_v2(
+                secret=secret,
+                timestamp=timestamp,
+                nonce=nonce,
+                method=method,
+                path=path,
+                payload=payload,
+            )
         if timestamp is not None:
-            data = f"{timestamp}.".encode("utf-8") + payload
+            data = f"{timestamp}.".encode("utf-8") + (payload or b"")
         else:
-            data = payload
+            data = payload or b""
         return hmac.new(secret.encode("utf-8"), data, hashlib.sha256).hexdigest()
 
     @staticmethod
@@ -70,23 +328,36 @@ class HMACVerifier:
         timestamp: Optional[Union[str, int]] = None,
         max_age_seconds: float = 300.0,
         nonce: Optional[str] = None,
+        method: str = "POST",
+        path: str = "/",
         enforce_timestamp: bool = False,
+        enforce_nonce: bool = False,
+        allow_legacy: bool = True,
+        nonce_store: Optional[BaseNonceStore] = None,
     ) -> bool:
         """
         Verify payload HMAC signature against expected signature.
-        Includes timestamp expiration checks and atomic nonce deduplication.
-        Strict verification: if timestamp is provided or enforced, no legacy fallback is permitted.
-        Nonce is recorded ONLY after signature is verified.
+        Supports NexaPy-HMAC-v2 with timestamp, nonce, method, path, and body SHA-256 hash.
+        Strict verification:
+        - If timestamp is provided or enforce_timestamp is True, timestamp is mandatory and expiration checked.
+        - If timestamp is provided or enforce_timestamp is True or enforce_nonce is True, nonce is mandatory.
+        - Replay defense: Nonce is checked and atomically recorded only after the signature is verified.
+        - If allow_legacy is False or timestamp/nonce is provided, legacy fallback without timestamp is rejected.
         """
         if not secret or not signature:
             return False
 
+        active_nonce_store = nonce_store or _global_nonce_store
         clean_sig = signature.replace("sha256=", "").strip()
+        has_timestamp = timestamp is not None and str(timestamp).strip() != ""
+        has_nonce = nonce is not None and str(nonce).strip() != ""
 
-        # Check timestamp if provided or enforced
-        has_timestamp = timestamp is not None
-        if has_timestamp or enforce_timestamp:
+        # Check timestamp requirements
+        if enforce_timestamp or has_timestamp:
             if not has_timestamp:
+                return False
+            # P0 Finding: When timestamp is enforced/provided, nonce is mandatory
+            if not has_nonce:
                 return False
             try:
                 ts_val = float(timestamp)
@@ -96,19 +367,46 @@ class HMACVerifier:
             except (ValueError, TypeError):
                 return False
 
-            # Strict check: verify timestamped signature ONLY - NO legacy raw fallback
-            expected_with_ts = HMACVerifier.compute_signature(secret, payload, timestamp=timestamp)
-            if not hmac.compare_digest(expected_with_ts.lower(), clean_sig.lower()):
-                return False
-        else:
-            # Fallback check on raw payload only when no timestamp is supplied and timestamp not enforced
-            expected_raw = HMACVerifier.compute_signature(secret, payload)
-            if not hmac.compare_digest(expected_raw.lower(), clean_sig.lower()):
-                return False
+            # Strict check against NexaPy-HMAC-v2 protocol
+            expected_v2 = HMACVerifier.compute_signature_v2(
+                secret=secret,
+                timestamp=timestamp,
+                nonce=nonce,
+                method=method,
+                path=path,
+                payload=payload,
+            )
+            if hmac.compare_digest(expected_v2.lower(), clean_sig.lower()):
+                if not active_nonce_store.check_and_add(nonce, ttl_seconds=max_age_seconds):
+                    return False  # Replayed nonce!
+                return True
 
-        # Replay protection: Check and record nonce ONLY after signature is confirmed valid!
-        if nonce:
-            if not _global_nonce_tracker.check_and_add(nonce):
+            if allow_legacy:
+                expected_v1 = hmac.new(
+                    secret.encode("utf-8"),
+                    f"{timestamp}.".encode("utf-8") + (payload or b""),
+                    hashlib.sha256,
+                ).hexdigest()
+                if hmac.compare_digest(expected_v1.lower(), clean_sig.lower()):
+                    if has_nonce and not active_nonce_store.check_and_add(nonce, ttl_seconds=max_age_seconds):
+                        return False
+                    return True
+
+            return False
+
+        if enforce_nonce and not has_nonce:
+            return False
+
+        # If timestamp is omitted, only allowed when not enforcing timestamp and legacy is allowed
+        if not allow_legacy:
+            return False
+
+        expected_raw = HMACVerifier.compute_signature(secret, payload, version="v1")
+        if not hmac.compare_digest(expected_raw.lower(), clean_sig.lower()):
+            return False
+
+        if has_nonce:
+            if not active_nonce_store.check_and_add(nonce, ttl_seconds=max_age_seconds):
                 return False
 
         return True
@@ -117,7 +415,10 @@ class HMACVerifier:
 def verify_n8n_signature_guard(
     secret: str,
     max_age_seconds: float = 300.0,
-    enforce_timestamp: bool = False,
+    enforce_timestamp: bool = True,
+    enforce_nonce: bool = True,
+    allow_legacy: bool = False,
+    nonce_store: Optional[BaseNonceStore] = None,
 ) -> Callable:
     """
     FastAPI dependency factory enforcing HMAC SHA-256 signature and replay verification.
@@ -136,9 +437,26 @@ def verify_n8n_signature_guard(
                 detail="Missing X-NexaPy-Timestamp header for replay verification.",
             )
         nonce_header = request.headers.get("X-NexaPy-Nonce") or request.headers.get("x-nexapy-nonce")
+        if enforce_nonce and not nonce_header:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Missing X-NexaPy-Nonce header for replay verification.",
+            )
         body = await request.body()
+        req_path = f"{request.url.path}?{request.url.query}" if request.url.query else request.url.path
         if not HMACVerifier.verify_signature(
-            secret, body, sig_header, timestamp=ts_header, max_age_seconds=max_age_seconds, nonce=nonce_header, enforce_timestamp=enforce_timestamp
+            secret,
+            body,
+            sig_header,
+            timestamp=ts_header,
+            max_age_seconds=max_age_seconds,
+            nonce=nonce_header,
+            method=request.method,
+            path=req_path,
+            enforce_timestamp=enforce_timestamp,
+            enforce_nonce=enforce_nonce,
+            allow_legacy=allow_legacy,
+            nonce_store=nonce_store,
         ):
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
@@ -162,10 +480,14 @@ class APIKeyGuard:
         return key in self.valid_keys
 
 
+MAX_TOKENS_CEILING = 128000
+
+
 class AIAuthGuard:
     """
     Authentication & Usage Quota Guard protecting AI completion endpoints from unauthorized access
     and accidental budget exhaustion.
+    Supports upfront budget reservation, reconciliation, and ceiling enforcement.
     Fails closed by default when unconfigured unless allow_anonymous is explicitly True.
     """
 
@@ -179,8 +501,17 @@ class AIAuthGuard:
         self.valid_keys: Set[str] = set(valid_keys or [])
         self.limiter = RateLimiter(max_requests=max_requests_per_minute, window_seconds=60.0)
         self.token_usage: Dict[str, int] = {}
+        self.token_reservations: Dict[str, Tuple[str, int]] = {}
         self.token_limit = token_limit
         self.allow_anonymous = allow_anonymous
+
+    @property
+    def active_reservations(self) -> Dict[str, int]:
+        """Aggregate active token reservations by key_id."""
+        res: Dict[str, int] = {}
+        for kid, tok in self.token_reservations.values():
+            res[kid] = res.get(kid, 0) + tok
+        return res
 
     def is_authorized(self, request: Request) -> Tuple[bool, Optional[str], Optional[str]]:
         """
@@ -209,10 +540,30 @@ class AIAuthGuard:
 
         if self.token_limit is not None:
             used = self.token_usage.get(key_id, 0)
-            if used >= self.token_limit:
-                return False, key_id, f"AI token quota exceeded ({used}/{self.token_limit} tokens used)."
+            pending = sum(tok for kid, tok in self.token_reservations.values() if kid == key_id)
+            if used + pending >= self.token_limit:
+                return False, key_id, f"AI token quota exceeded ({used + pending}/{self.token_limit} tokens used or reserved)."
 
         return True, key_id, None
+
+    def reserve_budget(self, key_id: str, estimated_tokens: int) -> Tuple[bool, Optional[str], Optional[str]]:
+        """Reserve token budget upfront before executing provider request (P1 Finding 10)."""
+        if self.token_limit is not None and estimated_tokens > 0:
+            used = self.token_usage.get(key_id, 0)
+            pending = sum(tok for kid, tok in self.token_reservations.values() if kid == key_id)
+            if used + pending + estimated_tokens > self.token_limit:
+                return False, None, f"AI token budget exceeded. Required {estimated_tokens}, available {max(0, self.token_limit - used - pending)}."
+
+        reservation_id = f"res_{uuid.uuid4().hex[:12]}"
+        self.token_reservations[reservation_id] = (key_id, max(0, estimated_tokens))
+        return True, reservation_id, None
+
+    def reconcile_budget(self, reservation_id: Optional[str], key_id: str, actual_tokens: int = 0) -> None:
+        """Release reservation and record authoritative token usage."""
+        if reservation_id:
+            self.token_reservations.pop(reservation_id, None)
+        if actual_tokens > 0:
+            self.token_usage[key_id] = self.token_usage.get(key_id, 0) + actual_tokens
 
     def record_usage(self, key_id: str, tokens: int = 0) -> None:
         """Record token consumption against quota."""
@@ -320,4 +671,10 @@ class RedisRateLimiter(BaseRateLimiter):
     def reset(self) -> None:
         if self._fallback:
             self._fallback.reset()
+
+
+def is_ssrf_safe_url(*args: Any, **kwargs: Any) -> bool:
+    """Validate whether URL is safe from SSRF attacks."""
+    from nexapy.automation.actions.http import is_ssrf_safe_url as _is_safe
+    return _is_safe(*args, **kwargs)
 
