@@ -1,4 +1,4 @@
-"""Multi-step DAG (Directed Acyclic Graph) Workflow Execution Engine."""
+z"""Multi-step DAG (Directed Acyclic Graph) Workflow Execution Engine."""
 
 import asyncio
 import inspect
@@ -296,13 +296,13 @@ class DAGStateStore:
                         # Fencing check failed: lease expired or preempted!
                         return False
                 else:
-                    # Without claim_token, check if step is actively claimed; if so, reject overwrite!
+                    # Without claim_token, check if step record already exists; if so, reject overwrite!
                     cursor = conn.execute(
                         "SELECT status, claim_token FROM nexapy_dag_states WHERE tenant_id = ? AND workflow_name = ? AND run_id = ? AND step_name = ?",
                         (tenant_id, workflow_name, run_id, step_name),
                     )
                     row = cursor.fetchone()
-                    if row and row[0] == "RUNNING":
+                    if row:
                         conn.commit()
                         return False
 
@@ -311,11 +311,6 @@ class DAGStateStore:
                         INSERT INTO nexapy_dag_states
                         (tenant_id, workflow_name, run_id, step_name, result, status, error, updated_at)
                         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                        ON CONFLICT(tenant_id, workflow_name, run_id, step_name) DO UPDATE SET
-                            result=excluded.result,
-                            status=excluded.status,
-                            error=excluded.error,
-                            updated_at=excluded.updated_at
                         """,
                         (tenant_id, workflow_name, run_id, step_name, result_json, status, error, now),
                     )
@@ -334,8 +329,8 @@ class DAGStateStore:
                 if existing.get("claim_token") != claim_token or existing.get("status") != "RUNNING":
                     return False
             else:
-                if step_key in self._step_records and self._step_records[step_key].get("status") == "RUNNING":
-                    # Actively claimed! Reject unauthenticated overwrite
+                if step_key in self._step_records:
+                    # Step already exists! Reject unauthenticated overwrite without claim_token
                     return False
 
             if key not in self._memory_store:

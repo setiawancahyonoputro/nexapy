@@ -2,7 +2,7 @@
 
 [![Python Version](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://python.org)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Build Status](https://img.shields.io/badge/tests-174%20passed-brightgreen.svg)](#)
+[![Build Status](https://img.shields.io/badge/tests-186%20passed-brightgreen.svg)](#)
 [![Version](https://img.shields.io/badge/version-0.3.0.dev0-orange.svg)](#)
 
 **NexaPy** is a modern Python API Framework, Multi-Provider AI Gateway, and Workflow Automation Engine built on top of **FastAPI**. It is designed to bridge backend business logic, multi-model AI routing, asynchronous workflow orchestration, and cross-platform clients (React, Node.js, PHP, Kotlin, Flutter).
@@ -48,17 +48,18 @@
 
 | Component | Status | Details |
 | :--- | :--- | :--- |
-| **FastAPI Core & ASGI Runtime** | 🟢 **Stable** | Production-ready HTTP/ASGI engine, OpenAPI docs, and lifespan management. |
-| **Fail-Closed Security & HMAC** | 🟢 **Stable** | Mandatory authentication fail-closed, timestamp + nonce replay defense, rate limiting, SSRF guard. |
-| **AI Router & Fallback Chain** | 🟢 **Stable** | Multi-provider fallback (OpenAI, Gemini, Claude, DeepSeek, FreeModel), circuit breaker state machine, SSE streaming. |
-| **Workflow Engine & DAG** | 🟢 **Stable** | Topological parallel DAG execution, single-step execution with `run_id` state store. |
-| **Job Queue & Recovery** | 🟢 **Stable** | Persistent SQLite job queue with server restart recovery, worker pool, idempotency key, and `/jobs` API. |
-| **Cron & Interval Scheduler** | 🟢 **Stable** | In-process 5-field cron matcher (`minute hour day month day_of_week`) and interval parser. |
-| **Node.js & TypeScript SDKs** | 🟢 **Stable** | Dual-module (CommonJS + ESM) Node.js package (`@nexapy/client`) and TypeScript fetch client. |
-| **n8n DAG Export & Merge Nodes** | 🟡 **Experimental** | Visual DAG export with `n8n-nodes-base.merge` synchronization, PUT API upsert, and Credentials binding. |
+| **FastAPI Core & ASGI Runtime** | 🟡 **Beta** | Modern HTTP/ASGI engine, OpenAPI docs, and lifespan management. |
+| **Fail-Closed Security & HMAC** | 🟡 **Beta** | Mandatory authentication fail-closed, timestamp + nonce replay defense, rate limiting, SSRF guard. |
+| **AI Router & Fallback Chain** | 🟡 **Beta** | Multi-provider fallback (OpenAI, Gemini, Claude, DeepSeek, FreeModel), circuit breaker state machine, SSE streaming. |
+| **Workflow Engine & DAG** | 🟡 **Beta** | Topological parallel DAG execution, single-step execution with `run_id` state store and tenant isolation. |
+| **Job Queue & Scheduler** | 🟡 **Beta** | Persistent SQLite job queue with restart recovery, heartbeat renewal, atomic lease, and cron/interval scheduler. |
+| **Node.js & TypeScript SDKs** | 🟡 **Beta** | Dual-module (CommonJS + ESM) Node.js package (`@nexapy/client`) and TypeScript fetch client. |
+| **n8n Workflow Export (Single-Call)** | 🟢 **Recommended** | High-level orchestration where n8n triggers the full workflow endpoint in NexaPy. |
+| **n8n DAG Visual Export (Per-Step)** | 🟡 **Experimental** | Visual multi-step DAG export with merge nodes; requires network access from n8n to NexaPy step URLs. |
+| **n8n Workflow Importer & Codegen** | 🟡 **Scaffold / Importer** | Inspects n8n definitions, identifies endpoints, and generates Python scaffold code for supported node types. |
 | **n8n Community Node Generator**| 🟡 **Experimental** | Auto-generates TypeScript package with real HTTP requests, HMAC SHA-256 signing, and Gulp build tooling. |
 | **PHP, Kotlin & Flutter SDKs** | 🟡 **Experimental** | PSR-18/cURL PHP client, Kotlin OkHttp client, and Dart Flutter packages. |
-| **Multi-Tenancy & Tenant Quotas** | 🔵 **Planned** | Per-tenant token budget caps, dynamic key management, and billing dashboards. |
+| **Multi-Tenancy & Tenant Quotas** | 🔵 **Planned** | Full multi-tenant isolation, dynamic tenant key management, token quotas, and billing dashboards. |
 | **OpenTelemetry OTLP Exporter** | 🔵 **Planned** | Native OTLP span forwarding to Jaeger, Datadog, and Honeycomb. |
 
 ---
@@ -232,7 +233,7 @@ NexaPy includes an automated test suite covering unit tests, multi-provider rout
 ```bash
 pytest
 ```
-Result: **174 passed** across security, atomic queue concurrency, multi-provider routing, DAG isolation, scheduler leader election, and n8n integration test suites.
+Result: **186 passed** across security, atomic queue concurrency, multi-provider routing, DAG isolation, scheduler leader election, and n8n integration test suites.
 
 ---
 

@@ -1,10 +1,13 @@
 import asyncio
 import datetime
+import logging
 import re
 import time
 from typing import Dict, List, Optional
 from .registry import workflow_registry
 from .runner import runner
+
+logger = logging.getLogger("nexapy.scheduler")
 
 
 def _match_cron_field(field_val: int, expr: str, min_val: int, max_val: int) -> bool:
@@ -109,8 +112,9 @@ class WorkflowScheduler:
         if not self.db_path:
             return True
         import sqlite3
-        conn = sqlite3.connect(self.db_path, timeout=5.0)
+        conn = None
         try:
+            conn = sqlite3.connect(self.db_path, timeout=5.0)
             conn.execute("PRAGMA journal_mode=WAL")
             conn.execute(
                 """
@@ -133,10 +137,16 @@ class WorkflowScheduler:
             return True
         except sqlite3.IntegrityError:
             return False
-        except Exception:
-            return True
+        except Exception as exc:
+            # Fail-closed (P1-02): Never execute without lock on database failure or connection error
+            logger.warning(f"Scheduler lock acquisition failed for '{workflow_name}' ({execution_key}): {exc}")
+            return False
         finally:
-            conn.close()
+            if conn:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
 
     def _parse_interval_seconds(self, schedule_str: str) -> Optional[float]:
         """Parse intervals like '10s', '5m', '1h', or 'every 30s'."""

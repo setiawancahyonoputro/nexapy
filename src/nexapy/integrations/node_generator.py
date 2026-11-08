@@ -323,6 +323,9 @@ export class NexaPy implements INodeType {
 				let responseData: any;
 
 				if (operation === 'chatCompletion') {
+					if (!apiKey && !hmacSecret) {
+						throw new Error('NexaPy API credentials missing: please configure an API Key or HMAC Secret in node credentials.');
+					}
 					const prompt = this.getNodeParameter('prompt', i) as string;
 					const provider = this.getNodeParameter('provider', i) as string;
 					const reqBody: any = { prompt };
@@ -338,6 +341,9 @@ export class NexaPy implements INodeType {
 						json: true,
 					});
 				} else if (operation === 'executeWorkflow') {
+					if (!apiKey && !hmacSecret) {
+						throw new Error('NexaPy API credentials missing: please configure an API Key or HMAC Secret in node credentials.');
+					}
 					const workflowName = this.getNodeParameter('workflowName', i) as string;
 					const inputRaw = this.getNodeParameter('inputData', i) as any;
 					const reqBody = typeof inputRaw === 'string' ? JSON.parse(inputRaw) : (inputRaw || {});

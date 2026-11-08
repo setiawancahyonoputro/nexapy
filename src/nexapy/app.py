@@ -51,6 +51,7 @@ class NexaPy:
         allow_anonymous_ai: Optional[bool] = None,
         ai_api_keys: Optional[List[str]] = None,
         token_limit: Optional[int] = None,
+        hmac_secret: Optional[str] = None,
         **kwargs: Any,
     ):
         from . import __version__ as pkg_version
@@ -58,6 +59,7 @@ class NexaPy:
 
         self.version = version or pkg_version
         self.config = config or global_config
+        self._hmac_secret = hmac_secret or self.config.get("security.hmac_secret") or os.getenv("NEXAPY_HMAC_SECRET")
         app_title = title or self.config.get("app.name", "NexaPy App")
 
         # Lifespan context manager for worker pool, scheduler, and background jobs
@@ -164,6 +166,30 @@ class NexaPy:
             if norm_path in self._custom_ai_routes:
                 return await self._custom_ai_routes[norm_path](body, request)
             auth_ok, key_id, err_msg = self.ai_guard.is_authorized(request)
+            if not auth_ok and (request.headers.get("X-NexaPy-Signature") or request.headers.get("x-nexapy-signature")):
+                # Support HMAC signature authentication on /ai/chat (P1-09b)
+                body_bytes = await request.body()
+                sig_header = request.headers.get("X-NexaPy-Signature") or request.headers.get("x-nexapy-signature")
+                ts_header = request.headers.get("X-NexaPy-Timestamp") or request.headers.get("x-nexapy-timestamp")
+                nonce_header = request.headers.get("X-NexaPy-Nonce") or request.headers.get("x-nexapy-nonce")
+                req_path = f"{request.url.path}?{request.url.query}" if request.url.query else request.url.path
+                hmac_sec = getattr(self, "_hmac_secret", None) or self.config.get("security.hmac_secret") or os.getenv("NEXAPY_HMAC_SECRET")
+                if hmac_sec and HMACVerifier.verify_signature(
+                    hmac_sec,
+                    body_bytes,
+                    sig_header,
+                    timestamp=ts_header,
+                    nonce=nonce_header,
+                    method=request.method,
+                    path=req_path,
+                    enforce_timestamp=True,
+                    enforce_nonce=True,
+                    allow_legacy=False,
+                ):
+                    auth_ok = True
+                    key_id = f"hmac_{nonce_header}"
+                    err_msg = None
+
             if not auth_ok:
                 is_auth_error = (
                     "invalid" in (err_msg or "").lower()
@@ -239,6 +265,30 @@ class NexaPy:
         @self.fastapi.post("/ai/stream", tags=["AI Stream"])
         async def stream_ai(request: Request, body: AIChatRequest):
             auth_ok, key_id, err_msg = self.ai_guard.is_authorized(request)
+            if not auth_ok and (request.headers.get("X-NexaPy-Signature") or request.headers.get("x-nexapy-signature")):
+                # Support HMAC signature authentication on /ai/chat (P1-09b)
+                body_bytes = await request.body()
+                sig_header = request.headers.get("X-NexaPy-Signature") or request.headers.get("x-nexapy-signature")
+                ts_header = request.headers.get("X-NexaPy-Timestamp") or request.headers.get("x-nexapy-timestamp")
+                nonce_header = request.headers.get("X-NexaPy-Nonce") or request.headers.get("x-nexapy-nonce")
+                req_path = f"{request.url.path}?{request.url.query}" if request.url.query else request.url.path
+                hmac_sec = getattr(self, "_hmac_secret", None) or self.config.get("security.hmac_secret") or os.getenv("NEXAPY_HMAC_SECRET")
+                if hmac_sec and HMACVerifier.verify_signature(
+                    hmac_sec,
+                    body_bytes,
+                    sig_header,
+                    timestamp=ts_header,
+                    nonce=nonce_header,
+                    method=request.method,
+                    path=req_path,
+                    enforce_timestamp=True,
+                    enforce_nonce=True,
+                    allow_legacy=False,
+                ):
+                    auth_ok = True
+                    key_id = f"hmac_{nonce_header}"
+                    err_msg = None
+
             if not auth_ok:
                 is_auth_error = (
                     "invalid" in (err_msg or "").lower()
@@ -444,8 +494,10 @@ class NexaPy:
     def mount_workflows(
         self,
         prefix: str = "/workflows",
-        api_key: Optional[str] = None,
+        api_key: Optional[Union[str, Dict[str, Union[str, Dict[str, Any]]]]] = None,
         hmac_secret: Optional[str] = None,
+        tenant_id: Optional[str] = None,
+        tenant_keys: Optional[Dict[str, str]] = None,
         rate_limit_requests: int = 100,
         max_payload_bytes: int = 10 * 1024 * 1024,
         allow_anonymous: bool = False,
@@ -483,8 +535,9 @@ class NexaPy:
         route_prefix = "/" + prefix.strip("/")
         limiter = RateLimiter(max_requests=rate_limit_requests)
 
+        raw_api_key = api_key if isinstance(api_key, str) else None
         effective_api_key = (
-            api_key
+            raw_api_key
             or self.config.get("security.api_key")
             or self.config.get("workflows.api_key")
             or os.getenv("NEXAPY_API_KEY")
@@ -495,7 +548,42 @@ class NexaPy:
             or os.getenv("NEXAPY_HMAC_SECRET")
         )
 
-        if not allow_anonymous and not effective_api_key and not effective_hmac_secret:
+        # Authenticated Principals & Tenant mapping (P0-01 Finding V8)
+        from .security import AuthenticatedPrincipal
+        principals: Dict[str, AuthenticatedPrincipal] = {}
+
+        configured_tenant_keys = tenant_keys or self.config.get("security.tenant_keys")
+        if configured_tenant_keys:
+            for k, t in configured_tenant_keys.items():
+                principals[k] = AuthenticatedPrincipal(principal_id=k, tenant_id=t, allowed_tenants=[t])
+        elif isinstance(api_key, dict):
+            for k, v in api_key.items():
+                if isinstance(v, str):
+                    principals[k] = AuthenticatedPrincipal(principal_id=k, tenant_id=v, allowed_tenants=[v])
+                elif isinstance(v, dict):
+                    principals[k] = AuthenticatedPrincipal(
+                        principal_id=k,
+                        tenant_id=v.get("tenant_id", "default"),
+                        scopes=v.get("scopes", ["*"]),
+                        allowed_tenants=v.get("allowed_tenants", [v.get("tenant_id", "default")]),
+                    )
+        elif effective_api_key:
+            if tenant_id:
+                principals[effective_api_key] = AuthenticatedPrincipal(
+                    principal_id=effective_api_key,
+                    tenant_id=tenant_id,
+                    allowed_tenants=[tenant_id],
+                )
+            else:
+                def_t = self.config.get("security.default_tenant") or "default"
+                principals[effective_api_key] = AuthenticatedPrincipal(
+                    principal_id=effective_api_key,
+                    tenant_id=def_t,
+                    scopes=["*"],
+                    allowed_tenants=["*"],
+                )
+
+        if not allow_anonymous and not effective_api_key and not effective_hmac_secret and not principals:
             raise RuntimeError(
                 "Workflow authentication must be configured. "
                 "Provide api_key, hmac_secret, set NEXAPY_API_KEY environment variable, "
@@ -507,14 +595,10 @@ class NexaPy:
             res_headers = {"X-Correlation-ID": correlation_id}
             client_ip = req.client.host if req.client else "unknown"
 
-            # Derive server-authenticated tenant identity (P0 Finding V6 & V7)
-            tenant_id = (
-                req.headers.get("X-Tenant-ID")
-                or req.headers.get("x-tenant-id")
-                or self.config.get("security.default_tenant")
-                or "default"
-            )
-            sec_ctx = {"tenant_id": tenant_id, "user_id": client_ip, "authenticated": False}
+            # Derive server-authenticated tenant identity (P0 Finding V6, V7 & V8)
+            req_tenant = req.headers.get("X-Tenant-ID") or req.headers.get("x-tenant-id")
+            tenant_id = req_tenant or self.config.get("security.default_tenant") or "default"
+            sec_ctx: Dict[str, Any] = {"tenant_id": tenant_id, "user_id": client_ip, "authenticated": False}
 
             # Payload size check
             if max_payload_bytes and len(body_bytes) > max_payload_bytes:
@@ -545,7 +629,7 @@ class NexaPy:
 
             # Fail-closed authentication check
             if not allow_anonymous:
-                if not effective_api_key and not effective_hmac_secret:
+                if not effective_api_key and not effective_hmac_secret and not principals:
                     return JSONResponse(
                         status_code=403,
                         headers=res_headers,
@@ -560,13 +644,33 @@ class NexaPy:
                 auth_satisfied = False
 
                 # 1. Check API Key
-                if effective_api_key:
-                    provided_key = (
-                        req.headers.get("X-NexaPy-Key")
-                        or req.headers.get("x-nexapy-key")
-                        or req.headers.get("Authorization", "").replace("Bearer ", "").strip()
-                    )
-                    if provided_key == effective_api_key:
+                provided_key = (
+                    req.headers.get("X-NexaPy-Key")
+                    or req.headers.get("x-nexapy-key")
+                    or req.headers.get("Authorization", "").replace("Bearer ", "").strip()
+                )
+
+                if provided_key:
+                    if provided_key in principals:
+                        principal = principals[provided_key]
+                        if req_tenant and not principal.is_tenant_authorized(req_tenant):
+                            return JSONResponse(
+                                status_code=403,
+                                headers=res_headers,
+                                content={
+                                    "success": False,
+                                    "error_code": "TENANT_FORBIDDEN",
+                                    "error": f"API key is bound to tenant '{principal.tenant_id}' and cannot access requested tenant '{req_tenant}'.",
+                                    "correlation_id": correlation_id,
+                                },
+                            ), sec_ctx
+                        eff_tenant = req_tenant if (req_tenant and principal.is_tenant_authorized(req_tenant)) else principal.tenant_id
+                        sec_ctx["tenant_id"] = eff_tenant
+                        sec_ctx["principal_id"] = provided_key
+                        sec_ctx["principal"] = principal.to_dict()
+                        auth_satisfied = True
+                    elif effective_api_key and provided_key == effective_api_key:
+                        sec_ctx["tenant_id"] = req_tenant or "default"
                         auth_satisfied = True
 
                 # 2. Check HMAC Signature with timestamp and nonce replay protection
@@ -674,7 +778,7 @@ class NexaPy:
                     content={"success": False, "error_code": "INVALID_INPUT", "error": "Field 'workflow' is required.", "correlation_id": correlation_id},
                 )
 
-            input_data = body.get("input") or body.get("payload") or {}
+            input_data = body.get("input") or body.get("payload") or body.get("input_data") or {}
             # Prevent tenant spoofing in input data
             if isinstance(input_data, dict) and "tenant_id" in input_data and input_data["tenant_id"] != sec_ctx.get("tenant_id"):
                 return JSONResponse(
@@ -689,17 +793,31 @@ class NexaPy:
                 )
 
             idempotency_key = body.get("idempotency_key")
-            job = await job_queue.enqueue(
-                workflow_name,
-                input_data=input_data,
-                idempotency_key=idempotency_key,
-                tenant_id=sec_ctx.get("tenant_id", "default"),
-                security_context=sec_ctx,
-            )
+            try:
+                job = await job_queue.enqueue(
+                    workflow_name,
+                    input_data=input_data,
+                    idempotency_key=idempotency_key,
+                    tenant_id=sec_ctx.get("tenant_id", "default"),
+                    security_context=sec_ctx,
+                )
+            except ValueError as val_err:
+                if "idempotency" in str(val_err).lower():
+                    return JSONResponse(
+                        status_code=409,
+                        headers=res_headers,
+                        content={
+                            "success": False,
+                            "error_code": "IDEMPOTENCY_CONFLICT",
+                            "error": str(val_err),
+                            "correlation_id": correlation_id,
+                        },
+                    )
+                raise
             return JSONResponse(
                 status_code=202,
                 headers=res_headers,
-                content={"success": True, "job": job.to_dict()},
+                content={"success": True, "job_id": job.job_id, "job": job.to_dict()},
             )
 
         @self.fastapi.get(f"{route_prefix}/jobs/{{job_id}}", tags=["Workflows"])
@@ -712,7 +830,7 @@ class NexaPy:
 
             from nexapy.automation.queue import job_queue
             job = job_queue.get_job(job_id)
-            if not job or (sec_ctx.get("tenant_id") != "default" and job.tenant_id != sec_ctx.get("tenant_id")):
+            if not job or job.tenant_id != sec_ctx.get("tenant_id"):
                 return JSONResponse(
                     status_code=404,
                     headers=res_headers,
@@ -721,10 +839,11 @@ class NexaPy:
             return JSONResponse(
                 status_code=200,
                 headers=res_headers,
-                content={"success": True, "job": job.to_dict()},
+                content={"success": True, "job_id": job.job_id, "job": job.to_dict()},
             )
 
         @self.fastapi.delete(f"{route_prefix}/jobs/{{job_id}}", tags=["Workflows"])
+        @self.fastapi.post(f"{route_prefix}/jobs/{{job_id}}/cancel", tags=["Workflows"])
         async def cancel_workflow_job(job_id: str, request: Request):
             correlation_id = request.headers.get("X-Correlation-ID") or generate_correlation_id()
             res_headers = {"X-Correlation-ID": correlation_id}
@@ -734,7 +853,7 @@ class NexaPy:
 
             from nexapy.automation.queue import job_queue
             job = job_queue.get_job(job_id)
-            if not job or (sec_ctx.get("tenant_id") != "default" and job.tenant_id != sec_ctx.get("tenant_id")):
+            if not job or job.tenant_id != sec_ctx.get("tenant_id"):
                 return JSONResponse(
                     status_code=404,
                     headers=res_headers,

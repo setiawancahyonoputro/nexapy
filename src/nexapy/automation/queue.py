@@ -1,13 +1,14 @@
 """Persistent Async Job Queue for background workflow execution in NexaPy."""
 
 import asyncio
+import hashlib
 import json
 import sqlite3
 import time
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 from .runner import runner
 
 
@@ -30,6 +31,7 @@ class Job:
     lease_expires_at: Optional[float] = None
     tenant_id: str = "default"
     security_context: Optional[Dict[str, Any]] = None
+    payload_hash: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -48,6 +50,7 @@ class Job:
             "lease_expires_at": self.lease_expires_at,
             "tenant_id": self.tenant_id,
             "security_context": self.security_context,
+            "payload_hash": self.payload_hash,
         }
 
 
@@ -109,15 +112,18 @@ class JobQueue:
                 ("lease_expires_at", "REAL"),
                 ("tenant_id", "TEXT"),
                 ("security_context", "TEXT"),
+                ("payload_hash", "TEXT"),
             ]:
                 try:
                     conn.execute(f"ALTER TABLE nexapy_jobs ADD COLUMN {col} {col_type}")
                 except Exception:
                     pass
 
+            # P0-03: Scope idempotency uniqueness per tenant
+            conn.execute("DROP INDEX IF EXISTS idx_nexapy_jobs_idempotency")
             conn.execute(
-                "CREATE UNIQUE INDEX IF NOT EXISTS idx_nexapy_jobs_idempotency "
-                "ON nexapy_jobs(idempotency_key) WHERE idempotency_key IS NOT NULL"
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_nexapy_jobs_tenant_idempotency "
+                "ON nexapy_jobs(tenant_id, idempotency_key) WHERE idempotency_key IS NOT NULL"
             )
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_nexapy_jobs_status_created "
@@ -138,7 +144,8 @@ class JobQueue:
     def _save_job(self, job: Job) -> None:
         self._jobs[job.job_id] = job
         if job.idempotency_key:
-            self._idempotency_map[job.idempotency_key] = job.job_id
+            eff_tenant = job.tenant_id or "default"
+            self._idempotency_map[(eff_tenant, job.idempotency_key)] = (job.job_id, job.payload_hash or "", job.workflow_name)
 
         if self.db_path:
             conn = self._get_connection()
@@ -146,8 +153,8 @@ class JobQueue:
                 conn.execute(
                     """
                     INSERT INTO nexapy_jobs
-                    (job_id, workflow_name, input_data, status, result, error, created_at, started_at, completed_at, idempotency_key, worker_id, claim_token, lease_expires_at, tenant_id, security_context)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    (job_id, workflow_name, input_data, status, result, error, created_at, started_at, completed_at, idempotency_key, worker_id, claim_token, lease_expires_at, tenant_id, security_context, payload_hash)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(job_id) DO UPDATE SET
                         workflow_name=excluded.workflow_name,
                         input_data=excluded.input_data,
@@ -161,7 +168,8 @@ class JobQueue:
                         claim_token=excluded.claim_token,
                         lease_expires_at=excluded.lease_expires_at,
                         tenant_id=excluded.tenant_id,
-                        security_context=excluded.security_context
+                        security_context=excluded.security_context,
+                        payload_hash=excluded.payload_hash
                     """,
                     (
                         job.job_id,
@@ -179,6 +187,7 @@ class JobQueue:
                         job.lease_expires_at,
                         job.tenant_id,
                         json.dumps(job.security_context) if job.security_context is not None else None,
+                        job.payload_hash,
                     ),
                 )
                 conn.commit()
@@ -283,29 +292,51 @@ class JobQueue:
     ) -> Job:
         """
         Enqueue a new workflow job for asynchronous processing.
-        If an idempotency_key is provided and an existing job matches, returns the existing job.
-        Maintains atomic database uniqueness on idempotency keys.
+        Idempotency keys are strictly scoped per (tenant_id, idempotency_key) (P0-03).
+        Payload conflict detection raises ValueError if key is reused with different inputs.
         """
+        eff_tenant = tenant_id or "default"
+        payload_bytes = json.dumps(input_data or {}, sort_keys=True).encode("utf-8")
+        current_payload_hash = hashlib.sha256(payload_bytes).hexdigest()
+
         if idempotency_key:
-            # Check persistent database first
+            # Check persistent database first (strictly scoped by tenant_id)
             if self.db_path:
                 conn = self._get_connection()
                 try:
                     cursor = conn.execute(
-                        "SELECT job_id FROM nexapy_jobs WHERE idempotency_key = ?",
-                        (idempotency_key,),
+                        "SELECT job_id, workflow_name, payload_hash, input_data FROM nexapy_jobs WHERE tenant_id = ? AND idempotency_key = ?",
+                        (eff_tenant, idempotency_key),
                     )
                     row = cursor.fetchone()
                     if row:
-                        found_job = self.get_job(row[0])
+                        found_id, prev_wf, prev_hash = row[0], row[1], row[2]
+                        if prev_wf != workflow_name:
+                            raise ValueError(
+                                f"Idempotency conflict: key '{idempotency_key}' was previously used for workflow '{prev_wf}', but requested for '{workflow_name}'."
+                            )
+                        if prev_hash and prev_hash != current_payload_hash:
+                            raise ValueError(
+                                f"Idempotency conflict: key '{idempotency_key}' was previously used with different payload."
+                            )
+                        found_job = self.get_job(found_id)
                         if found_job:
                             return found_job
                 finally:
                     conn.close()
 
-            # Check in-memory map
-            existing_id = self._idempotency_map.get(idempotency_key)
-            if existing_id:
+            # Check in-memory map (strictly scoped by tenant_id)
+            mem_entry = self._idempotency_map.get((eff_tenant, idempotency_key))
+            if mem_entry:
+                existing_id, prev_hash, prev_wf = mem_entry
+                if prev_wf != workflow_name:
+                    raise ValueError(
+                        f"Idempotency conflict: key '{idempotency_key}' was previously used for workflow '{prev_wf}', but requested for '{workflow_name}'."
+                    )
+                if prev_hash and prev_hash != current_payload_hash:
+                    raise ValueError(
+                        f"Idempotency conflict: key '{idempotency_key}' was previously used with different payload."
+                    )
                 existing_job = self.get_job(existing_id)
                 if existing_job:
                     return existing_job
@@ -319,8 +350,9 @@ class JobQueue:
             status="QUEUED",
             idempotency_key=idempotency_key,
             created_at=now,
-            tenant_id=tenant_id,
+            tenant_id=eff_tenant,
             security_context=security_context,
+            payload_hash=current_payload_hash,
         )
 
         if self.db_path and idempotency_key:
@@ -328,20 +360,23 @@ class JobQueue:
             try:
                 conn.execute("BEGIN IMMEDIATE")
                 cursor = conn.execute(
-                    "SELECT job_id FROM nexapy_jobs WHERE idempotency_key = ?",
-                    (idempotency_key,),
+                    "SELECT job_id, workflow_name, payload_hash FROM nexapy_jobs WHERE tenant_id = ? AND idempotency_key = ?",
+                    (eff_tenant, idempotency_key),
                 )
                 row = cursor.fetchone()
                 if row:
                     conn.rollback()
-                    found = self.get_job(row[0])
+                    found_id, prev_wf, prev_hash = row[0], row[1], row[2]
+                    if prev_wf != workflow_name or (prev_hash and prev_hash != current_payload_hash):
+                        raise ValueError(f"Idempotency conflict: key '{idempotency_key}' was previously used with different parameters.")
+                    found = self.get_job(found_id)
                     if found:
                         return found
                 conn.execute(
                     """
                     INSERT INTO nexapy_jobs
-                    (job_id, workflow_name, input_data, status, result, error, created_at, started_at, completed_at, idempotency_key, worker_id, claim_token, lease_expires_at, tenant_id, security_context)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    (job_id, workflow_name, input_data, status, result, error, created_at, started_at, completed_at, idempotency_key, worker_id, claim_token, lease_expires_at, tenant_id, security_context, payload_hash)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         job.job_id,
@@ -359,22 +394,26 @@ class JobQueue:
                         None,
                         job.tenant_id,
                         json.dumps(job.security_context) if job.security_context is not None else None,
+                        job.payload_hash,
                     ),
                 )
                 conn.commit()
                 self._jobs[job.job_id] = job
-                self._idempotency_map[idempotency_key] = job.job_id
+                self._idempotency_map[(eff_tenant, idempotency_key)] = (job.job_id, current_payload_hash, workflow_name)
                 await self._queue.put(job_id)
                 return job
             except sqlite3.IntegrityError:
                 conn.rollback()
                 cursor = conn.execute(
-                    "SELECT job_id FROM nexapy_jobs WHERE idempotency_key = ?",
-                    (idempotency_key,),
+                    "SELECT job_id, workflow_name, payload_hash FROM nexapy_jobs WHERE tenant_id = ? AND idempotency_key = ?",
+                    (eff_tenant, idempotency_key),
                 )
                 row = cursor.fetchone()
                 if row:
-                    found = self.get_job(row[0])
+                    found_id, prev_wf, prev_hash = row[0], row[1], row[2]
+                    if prev_wf != workflow_name or (prev_hash and prev_hash != current_payload_hash):
+                        raise ValueError(f"Idempotency conflict: key '{idempotency_key}' was previously used with different parameters.")
+                    found = self.get_job(found_id)
                     if found:
                         return found
             finally:
@@ -529,7 +568,7 @@ class JobQueue:
                 return None
 
             cursor = conn.execute(
-                "SELECT job_id, workflow_name, input_data, status, result, error, created_at, started_at, completed_at, idempotency_key, worker_id, claim_token, lease_expires_at, tenant_id, security_context "
+                "SELECT job_id, workflow_name, input_data, status, result, error, created_at, started_at, completed_at, idempotency_key, worker_id, claim_token, lease_expires_at, tenant_id, security_context, payload_hash "
                 "FROM nexapy_jobs WHERE job_id = ?",
                 (job_id,),
             )
@@ -553,6 +592,7 @@ class JobQueue:
                 lease_expires_at=row[12] if len(row) > 12 else None,
                 tenant_id=row[13] if len(row) > 13 and row[13] else "default",
                 security_context=json.loads(row[14]) if len(row) > 14 and row[14] else None,
+                payload_hash=row[15] if len(row) > 15 else None,
             )
             self._jobs[job_id] = job
             return job
@@ -611,7 +651,7 @@ class JobQueue:
                 return None
 
             cursor = conn.execute(
-                "SELECT job_id, workflow_name, input_data, status, result, error, created_at, started_at, completed_at, idempotency_key, worker_id, claim_token, lease_expires_at, tenant_id, security_context "
+                "SELECT job_id, workflow_name, input_data, status, result, error, created_at, started_at, completed_at, idempotency_key, worker_id, claim_token, lease_expires_at, tenant_id, security_context, payload_hash "
                 "FROM nexapy_jobs WHERE job_id = ?",
                 (job_id,),
             )
@@ -635,6 +675,7 @@ class JobQueue:
                 lease_expires_at=row[12] if len(row) > 12 else None,
                 tenant_id=row[13] if len(row) > 13 and row[13] else "default",
                 security_context=json.loads(row[14]) if len(row) > 14 and row[14] else None,
+                payload_hash=row[15] if len(row) > 15 else None,
             )
             self._jobs[job_id] = job
             return job
@@ -725,7 +766,7 @@ class JobQueue:
             conn = self._get_connection()
             try:
                 cursor = conn.execute(
-                    "SELECT job_id, workflow_name, input_data, status, result, error, created_at, started_at, completed_at, idempotency_key, worker_id, claim_token, lease_expires_at, tenant_id, security_context "
+                    "SELECT job_id, workflow_name, input_data, status, result, error, created_at, started_at, completed_at, idempotency_key, worker_id, claim_token, lease_expires_at, tenant_id, security_context, payload_hash "
                     "FROM nexapy_jobs WHERE job_id = ?",
                     (job_id,),
                 )
@@ -747,10 +788,11 @@ class JobQueue:
                         lease_expires_at=row[12] if len(row) > 12 else None,
                         tenant_id=row[13] if len(row) > 13 and row[13] else "default",
                         security_context=json.loads(row[14]) if len(row) > 14 and row[14] else None,
+                        payload_hash=row[15] if len(row) > 15 else None,
                     )
                     self._jobs[job_id] = job
                     if job.idempotency_key:
-                        self._idempotency_map[job.idempotency_key] = job_id
+                        self._idempotency_map[(job.tenant_id or "default", job.idempotency_key)] = (job_id, job.payload_hash or "", job.workflow_name)
                     return job
             finally:
                 conn.close()

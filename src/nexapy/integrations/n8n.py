@@ -9,6 +9,11 @@ import httpx
 from nexapy.automation import DAGWorkflow, workflow_registry
 
 
+class UnsupportedNodeError(Exception):
+    """Raised when an n8n workflow contains an unsupported node type for semantic code generation."""
+    pass
+
+
 def convert_schedule_to_n8n_cron(schedule_str: str) -> str:
     """Convert intervals like '5m', 'every 5m', '1h' into valid 5-field cron for n8n."""
     clean = schedule_str.strip()
@@ -21,17 +26,29 @@ def convert_schedule_to_n8n_cron(schedule_str: str) -> str:
         return "*/5 * * * *"
     val, unit = int(float(m.group(1))), m.group(2) or "m"
     if unit in ("m", "min"):
-        return f"*/{val} * * * *" if 1 <= val <= 59 else "* * * * *"
+        if 1 <= val <= 59:
+            return f"*/{val} * * * *"
+        elif val >= 60:
+            if val % 60 == 0:
+                hours = val // 60
+                return f"0 */{hours} * * *" if 1 <= hours <= 23 else "0 0 * * *"
+            else:
+                # P1-03: Do not silently change 61m to '* * * * *'
+                raise ValueError(
+                    f"Interval '{schedule_str}' cannot be represented as an exact 5-field cron expression."
+                )
+        else:
+            raise ValueError(f"Invalid minute interval '{schedule_str}'.")
     elif unit in ("h", "hr"):
         return f"0 */{val} * * *" if 1 <= val <= 23 else "0 * * * *"
     elif unit in ("d",):
         return f"0 0 */{val} * *" if 1 <= val <= 31 else "0 0 * * *"
     elif unit in ("s", "sec"):
-        # n8n scheduleTrigger only supports minute-level resolution (5-field cron)
+        # n8n scheduleTrigger only supports minute-level resolution for standard 5-field cron
         # Sub-minute intervals cannot be represented without changing meaning (e.g. 30s -> 1m)
         if val < 60:
             raise ValueError(
-                f"Sub-minute interval '{schedule_str}' cannot be converted to standard 5-field n8n cron expression (minimum resolution is 1 minute / 60 seconds)."
+                f"Sub-minute interval '{schedule_str}' cannot be converted to standard 5-field n8n cron expression (minimum resolution is 1 minute / 60 seconds). Use convert_schedule_to_n8n_rule for native seconds support."
             )
         if val % 60 != 0:
             raise ValueError(
@@ -40,6 +57,55 @@ def convert_schedule_to_n8n_cron(schedule_str: str) -> str:
         mins = int(val // 60)
         return f"*/{mins} * * * *" if 1 <= mins <= 59 else "* * * * *"
     return "*/5 * * * *"
+
+
+def convert_schedule_to_n8n_rule(schedule_str: str) -> Dict[str, Any]:
+    """
+    Convert schedule string into native n8n ScheduleTrigger rule parameters (P1-03).
+    Supports secondsInterval, minutesInterval, hoursInterval, daysInterval, and cronExpression.
+    """
+    clean = schedule_str.strip()
+    if len(clean.split()) == 5:
+        return {
+            "interval": [
+                {
+                    "field": "cronExpression",
+                    "expression": clean,
+                }
+            ],
+            "cronExpression": clean,
+        }
+
+    lower = clean.lower().replace("every", "").strip()
+    m = re.match(r"^(\d+(?:\.\d+)?)\s*(s|sec|m|min|h|hr|d)?$", lower)
+    if not m:
+        return {
+            "interval": [{"field": "cronExpression", "expression": clean}],
+            "cronExpression": clean,
+        }
+
+    val, unit = int(float(m.group(1))), m.group(2) or "m"
+    if unit in ("s", "sec"):
+        return {"interval": [{"field": "seconds", "secondsInterval": val}]}
+    elif unit in ("m", "min"):
+        rule_dict: Dict[str, Any] = {"interval": [{"field": "minutes", "minutesInterval": val}]}
+        if 1 <= val <= 59:
+            rule_dict["cronExpression"] = f"*/{val} * * * *"
+        return rule_dict
+    elif unit in ("h", "hr"):
+        return {
+            "interval": [{"field": "hours", "hoursInterval": val}],
+            "cronExpression": f"0 */{val} * * *" if 1 <= val <= 23 else "0 * * * *",
+        }
+    elif unit in ("d",):
+        return {
+            "interval": [{"field": "days", "daysInterval": val}],
+            "cronExpression": f"0 0 */{val} * *" if 1 <= val <= 31 else "0 0 * * *",
+        }
+    return {
+        "interval": [{"field": "cronExpression", "expression": clean}],
+        "cronExpression": clean,
+    }
 
 
 def export_n8n_workflow(
@@ -51,6 +117,7 @@ def export_n8n_workflow(
     use_credentials: bool = False,
     credential_name: Optional[str] = None,
     credential_id: Optional[str] = None,
+    auth_mode: str = "none",
     mode: str = "single_call",
 ) -> Dict[str, Any]:
     """
@@ -72,6 +139,8 @@ def export_n8n_workflow(
             use_credentials=use_credentials,
             credential_name=credential_name,
             credential_id=credential_id,
+            auth_mode=auth_mode,
+            response_mode=response_mode,
             mode=mode,
         )
 
@@ -82,19 +151,10 @@ def export_n8n_workflow(
     nodes = []
 
     if getattr(wf, "schedule", None):
-        cron_expr = convert_schedule_to_n8n_cron(wf.schedule)
+        rule = convert_schedule_to_n8n_rule(wf.schedule)
         trigger_node = {
             "parameters": {
-                "rule": {
-                    "mode": "custom",
-                    "cronExpression": cron_expr,
-                    "interval": [
-                        {
-                            "field": "cronExpression",
-                            "expression": cron_expr,
-                        }
-                    ],
-                }
+                "rule": rule,
             },
             "name": "Schedule Trigger",
             "type": "n8n-nodes-base.scheduleTrigger",
@@ -103,10 +163,12 @@ def export_n8n_workflow(
         }
         trigger_name = "Schedule Trigger"
     else:
+        # P1-04: responseMode at root of parameters
         trigger_params: Dict[str, Any] = {
             "httpMethod": "POST",
             "path": workflow_name,
-            "options": {"responseMode": response_mode},
+            "responseMode": response_mode,
+            "options": {},
         }
         trigger_node = {
             "parameters": trigger_params,
@@ -128,8 +190,9 @@ def export_n8n_workflow(
         "jsonBody": "={{ $json.body || $json }}",
     }
 
-    # P0 Finding 6 & 7: Use credentials as single source of secrets; no plaintext headerParameters
-    if auth_key or use_credentials or credential_name:
+    # P0 Finding 6 & 7 & V8 P0-04: Use credentials as single source of secrets; no plaintext headerParameters
+    bind_creds = bool(auth_key or use_credentials or credential_name or credential_id or auth_mode in ("httpHeaderAuth", "headerAuth"))
+    if bind_creds:
         http_params["authentication"] = "genericCredentialType"
         http_params["genericAuthType"] = "httpHeaderAuth"
 
@@ -142,7 +205,7 @@ def export_n8n_workflow(
         "position": [500, 300],
     }
 
-    if auth_key or use_credentials or credential_name:
+    if bind_creds:
         http_node["credentials"] = {
             "httpHeaderAuth": {
                 "id": cred_id,
@@ -188,6 +251,8 @@ def export_dag_to_n8n(
     use_credentials: bool = False,
     credential_name: Optional[str] = None,
     credential_id: Optional[str] = None,
+    auth_mode: str = "none",
+    response_mode: str = "onReceived",
     use_merge_nodes: bool = False,
     mode: str = "single_call",
 ) -> Dict[str, Any]:
@@ -207,19 +272,10 @@ def export_dag_to_n8n(
     trigger_name = f"Webhook - {dag.name}"
 
     if getattr(dag, "schedule", None):
-        cron_expr = convert_schedule_to_n8n_cron(dag.schedule)
+        rule = convert_schedule_to_n8n_rule(dag.schedule)
         trigger_node = {
             "parameters": {
-                "rule": {
-                    "mode": "custom",
-                    "cronExpression": cron_expr,
-                    "interval": [
-                        {
-                            "field": "cronExpression",
-                            "expression": cron_expr,
-                        }
-                    ],
-                }
+                "rule": rule,
             },
             "name": f"Schedule - {dag.name}",
             "type": "n8n-nodes-base.scheduleTrigger",
@@ -228,13 +284,21 @@ def export_dag_to_n8n(
         }
         trigger_name = f"Schedule - {dag.name}"
     else:
+        # P1-04: responseMode at root of parameters
         trigger_node = {
-            "parameters": {"httpMethod": "POST", "path": dag.name, "options": {}},
+            "parameters": {
+                "httpMethod": "POST",
+                "path": dag.name,
+                "responseMode": response_mode,
+                "options": {},
+            },
             "name": trigger_name,
             "type": "n8n-nodes-base.webhook",
             "typeVersion": 1,
             "position": [250, 300],
         }
+
+    bind_creds = bool(auth_key or use_credentials or credential_name or credential_id or auth_mode in ("httpHeaderAuth", "headerAuth"))
 
     if mode == "single_call":
         # Mode 1: Safe single-call execution of entire DAG
@@ -245,7 +309,7 @@ def export_dag_to_n8n(
             "specifyBody": "json",
             "jsonBody": "={{ $json.body || $json }}",
         }
-        if auth_key or use_credentials or credential_name:
+        if bind_creds:
             http_params["authentication"] = "genericCredentialType"
             http_params["genericAuthType"] = "httpHeaderAuth"
 
@@ -256,7 +320,7 @@ def export_dag_to_n8n(
             "typeVersion": 4.2,
             "position": [500, 300],
         }
-        if auth_key or use_credentials or credential_name:
+        if bind_creds:
             http_node["credentials"] = {
                 "httpHeaderAuth": {
                     "id": cred_id,
@@ -288,11 +352,11 @@ def export_dag_to_n8n(
                 "url": step_endpoint_url,
                 "sendBody": True,
                 "specifyBody": "json",
-                # P1 Finding 17 & V5 P1-02: valid n8n expression format for JSON body
-                "jsonBody": f'={{{{ {{"step": "{dag_node.name}", "run_id": ($json.run_id || $execution.id), "payload": $json}} }}}}',
+                # P1-05: preserve original payload across multi-step execution ($json.payload || $json)
+                "jsonBody": f'={{{{ {{"step": "{dag_node.name}", "run_id": ($json.run_id || $execution.id), "payload": ($json.payload || $json)}} }}}}',
             }
 
-            if auth_key or use_credentials or credential_name:
+            if bind_creds:
                 http_params["authentication"] = "genericCredentialType"
                 http_params["genericAuthType"] = "httpHeaderAuth"
 
@@ -304,7 +368,7 @@ def export_dag_to_n8n(
                 "position": [x_pos, y_pos],
             }
 
-            if auth_key or use_credentials or credential_name:
+            if bind_creds:
                 step_node["credentials"] = {
                     "httpHeaderAuth": {
                         "id": cred_id,

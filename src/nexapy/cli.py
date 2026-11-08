@@ -38,9 +38,12 @@ def main(
 
 @app.command()
 def init(
-    name: str = typer.Argument(..., help="Name of the project directory to initialize")
+    name: str = typer.Argument(..., help="Name of the project directory to initialize"),
+    dev_unsafe: bool = typer.Option(False, "--dev-unsafe", help="Allow unauthenticated anonymous AI access for local testing (insecure)"),
 ):
     """Initialize a new NexaPy project directory with complete starter files."""
+    import secrets
+
     target_dir = Path.cwd() / name
     if target_dir.exists():
         typer.echo(f"Error: Directory '{name}' already exists.")
@@ -48,16 +51,22 @@ def init(
 
     target_dir.mkdir(parents=True, exist_ok=True)
 
+    allow_anon = dev_unsafe
+    if dev_unsafe:
+        console.print("[bold yellow]WARNING: --dev-unsafe enabled. Anonymous AI access is permitted.[/bold yellow]")
+
+    generated_key = f"nxp_{secrets.token_urlsafe(32)}"
+
     # 1. app.py
     app_file = target_dir / "app.py"
-    starter_code = '''from nexapy import NexaPy
+    starter_code = f'''from nexapy import NexaPy
 
-app = NexaPy(title="Hello NexaPy App", allow_anonymous_ai=True)
+app = NexaPy(title="Hello NexaPy App", allow_anonymous_ai={allow_anon})
 
 
 @app.get("/")
 def read_root():
-    return {"message": "Hello from NexaPy!"}
+    return {{"message": "Hello from NexaPy!"}}
 
 
 @app.ai("/ai/chat")
@@ -79,7 +88,7 @@ cors:
 
 ai:
   provider: auto
-  allow_anonymous_ai: true
+  allow_anonymous_ai: {str(allow_anon).lower()}
   priority:
     - freemodel
     - gemini
@@ -90,22 +99,22 @@ ai:
 '''
     (target_dir / "framework.yaml").write_text(yaml_code, encoding="utf-8")
 
-    # 3. .env.example (with placeholders) and .env (with empty keys)
+    # 3. .env.example (with placeholders) and .env (with cryptographically random key)
     env_example = '''# NexaPy Environment Variables Example
 FREEMODEL_API_KEY=your_freemodel_api_key_here
 GEMINI_API_KEY=your_gemini_api_key_here
 NEXAPY_AI_PROVIDER=auto
 NEXAPY_CORS_ENABLED=true
-NEXAPY_ALLOW_ANONYMOUS_AI=true
-NEXAPY_API_KEY=dev-secret-api-key
+NEXAPY_ALLOW_ANONYMOUS_AI=false
+NEXAPY_API_KEY=your_secure_api_key_here
 '''
-    env_actual = '''# NexaPy Environment Variables
+    env_actual = f'''# NexaPy Environment Variables
 FREEMODEL_API_KEY=
 GEMINI_API_KEY=
 NEXAPY_AI_PROVIDER=auto
 NEXAPY_CORS_ENABLED=true
-NEXAPY_ALLOW_ANONYMOUS_AI=true
-NEXAPY_API_KEY=dev-secret-api-key
+NEXAPY_ALLOW_ANONYMOUS_AI={str(allow_anon).lower()}
+NEXAPY_API_KEY={generated_key}
 '''
     (target_dir / ".env.example").write_text(env_example, encoding="utf-8")
     (target_dir / ".env").write_text(env_actual, encoding="utf-8")
@@ -406,6 +415,9 @@ def n8n_export(
     host: str = typer.Option("http://localhost:8000", "--host", "-h", help="NexaPy API server host URL"),
     prefix: str = typer.Option("/workflows", "--prefix", "-p", help="Workflow HTTP endpoint prefix"),
     auth_key: Optional[str] = typer.Option(None, "--auth-key", "-k", help="Optional X-NexaPy-Key header value"),
+    credential_id: Optional[str] = typer.Option(None, "--credential-id", help="n8n Credential ID for httpHeaderAuth"),
+    credential_name: Optional[str] = typer.Option(None, "--credential-name", help="n8n Credential display name"),
+    auth_mode: str = typer.Option("none", "--auth-mode", help="Authentication mode ('none', 'httpHeaderAuth')"),
 ):
     """Export NexaPy workflows into n8n node format JSON."""
     import json
@@ -424,7 +436,15 @@ def n8n_export(
         out_directory.mkdir(parents=True, exist_ok=True)
 
         for wf in workflows:
-            n8n_data = export_n8n_workflow(wf.name, host=host, prefix=prefix, auth_key=auth_key)
+            n8n_data = export_n8n_workflow(
+                wf.name,
+                host=host,
+                prefix=prefix,
+                auth_key=auth_key,
+                credential_id=credential_id,
+                credential_name=credential_name,
+                auth_mode=auth_mode,
+            )
             file_path = out_directory / f"{wf.name}.json"
             file_path.write_text(json.dumps(n8n_data, indent=2), encoding="utf-8")
             console.print(f"Exported: [cyan]{file_path}[/cyan]")
@@ -437,7 +457,15 @@ def n8n_export(
         raise typer.Exit(code=1)
 
     try:
-        n8n_data = export_n8n_workflow(name, host=host, prefix=prefix, auth_key=auth_key)
+        n8n_data = export_n8n_workflow(
+            name,
+            host=host,
+            prefix=prefix,
+            auth_key=auth_key,
+            credential_id=credential_id,
+            credential_name=credential_name,
+            auth_mode=auth_mode,
+        )
     except ValueError as err:
         console.print(f"\n[bold red]Error:[/bold red] {err}\n")
         raise typer.Exit(code=1)
@@ -542,7 +570,10 @@ def n8n_sync(
     api_key: str = typer.Option(..., "--api-key", "-k", help="n8n REST API key"),
     workflow_name: Optional[str] = typer.Argument(None, help="Name of workflow to sync (or all if omitted)"),
     host: str = typer.Option("http://localhost:8000", "--host", "-h", help="NexaPy API server host URL"),
-    activate: bool = typer.Option(True, "--activate/--no-activate", help="Activate workflow on n8n after creation"),
+    credential_id: Optional[str] = typer.Option(None, "--credential-id", help="n8n credential ID for NexaPy authentication"),
+    credential_name: Optional[str] = typer.Option(None, "--credential-name", help="n8n credential Name for NexaPy authentication"),
+    auth_mode: str = typer.Option("none", "--auth-mode", help="Auth mode to configure ('none', 'api_key', 'hmac')"),
+    activate: bool = typer.Option(False, "--activate/--no-activate", help="Activate workflow on n8n after creation (default: False)"),
 ):
     """Synchronize registered NexaPy workflows directly to a live n8n instance via REST API."""
     import asyncio
@@ -560,8 +591,21 @@ def n8n_sync(
 
     async def _sync():
         console.print(f"\n[bold cyan]Syncing NexaPy workflows to n8n instance at '{n8n_url}'...[/bold cyan]\n")
+        # Connectivity & credentials check
+        try:
+            await client.list_workflows(max_pages=1)
+        except Exception as conn_err:
+            console.print(f"[bold red]Failed to connect to n8n instance or invalid API key:[/bold red] {conn_err}")
+            raise typer.Exit(code=1)
+
         for name in target_names:
-            wf_data = export_n8n_workflow(name, host=host)
+            wf_data = export_n8n_workflow(
+                name,
+                host=host,
+                credential_id=credential_id,
+                credential_name=credential_name,
+                auth_mode=auth_mode,
+            )
             res = await client.sync_workflow(wf_data, upsert=True)
             wf_id = res.get("id") or res.get("data", {}).get("id")
             console.print(f"Synced workflow: [green]{name}[/green] (ID: {wf_id})")

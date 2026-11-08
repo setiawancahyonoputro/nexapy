@@ -7,8 +7,33 @@ import threading
 import time
 import urllib.parse
 from abc import ABC, abstractmethod
+from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple, Union
 from fastapi import HTTPException, Request, status
+
+
+@dataclass
+class AuthenticatedPrincipal:
+    """Server-verified principal identity with tenant binding and authorized scopes."""
+    principal_id: str
+    tenant_id: str
+    scopes: List[str] = field(default_factory=lambda: ["*"])
+    allowed_tenants: List[str] = field(default_factory=list)
+
+    def is_tenant_authorized(self, requested_tenant: Optional[str]) -> bool:
+        if not requested_tenant or requested_tenant == self.tenant_id:
+            return True
+        if "*" in self.allowed_tenants:
+            return True
+        return requested_tenant in self.allowed_tenants
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "principal_id": self.principal_id,
+            "tenant_id": self.tenant_id,
+            "scopes": list(self.scopes),
+            "allowed_tenants": list(self.allowed_tenants),
+        }
 
 
 class BaseNonceStore(ABC):
